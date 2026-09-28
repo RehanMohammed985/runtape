@@ -24,7 +24,8 @@ runtape = "runtape.cli:main"
 
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.3"]
-dev = ["pytest", "pytest-asyncio", "openai", "anthropic", "httpx", "langchain-core", "langgraph", "build", "twine"]
+mcp = ["mcp>=1.2"]
+dev = ["pytest", "pytest-asyncio", "openai", "anthropic", "httpx", "langchain-core", "langgraph", "langchain-anthropic", "mcp", "build", "twine"]
 
 [project.urls]
 Homepage = "https://github.com/RehanMohammed985/runtape"

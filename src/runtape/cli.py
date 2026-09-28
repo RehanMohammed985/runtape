@@ -494,6 +494,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--at", default="0", help="event to start at")
     s.add_argument("--model-fn", help="model function for why/rerun/odds inside the replay")
 
+    s = sub.add_parser("mcp", help="run an MCP server so coding agents can debug your runs")
+    s.add_argument("--model-fn", help="model function for why/rerun instead of the live API")
+
     s = sub.add_parser("ls", help="list recorded traces")
     s.add_argument("dir", nargs="?", default=DEFAULT_DIR)
 
@@ -562,6 +565,15 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
     args = build_parser().parse_args(argv)
     c = console or Console(no_color=args.no_color, highlight=False)
     cmd_name = args.cmd or "replay"
+
+    if cmd_name == "mcp":
+        try:
+            from .mcp_server import serve
+        except ImportError:
+            c.print(Text("The MCP server needs the mcp package: pip install 'runtape[mcp]'", style="red"))
+            return 1
+        serve(args.model_fn)
+        return 0
 
     try:
         if cmd_name == "ls":
