@@ -483,6 +483,24 @@ def _path(c) -> str:
     return " > ".join(parts)
 
 
+def _p(p: float) -> str:
+    return f"{p:.0e}".replace("e-0", "e-") if p < 0.001 else f"{p:.3f}"
+
+
+def _evidence(rep, t) -> Text:
+    b = rep.baseline
+    if rep.deterministic:
+        return Text(f"  Evidence: temperature 0, so each variant was rerun twice ({b.kept}/{b.n} with it, "
+                    f"{t.kept}/{t.n} without).", style="dim")
+    if t.p is None:
+        return Text(f"  Evidence: {b.kept}/{b.n} reruns with it, {t.kept}/{t.n} without.", style="dim")
+    return Text(
+        f"  Evidence: {b.kept}/{b.n} reruns with it, {t.kept}/{t.n} without. p = {_p(t.p)}, significant after "
+        f"correcting for {t.family} comparisons.",
+        style="dim",
+    )
+
+
 def show_why(rep, *, show_all: bool = False) -> RenderableType:
     t = rep.trace
     tgt = rep.target
@@ -534,6 +552,7 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             r.append(" and instead ")
             r.append(f"{alt} ({cnt}/{c.finest.n})", style="bold green")
         out.append(r)
+        out.append(_evidence(rep, c.finest))
         if len(c.chain) > 1:
             out.append(Text("  Narrowed down: " + _path(c), style="dim"))
         if c.masked:
@@ -554,9 +573,10 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
         if j.top_instead():
             r.append(f" and instead {j.top_instead()[0]}", style="green")
         out.append(r)
+        out.append(_evidence(rep, j))
 
     if prereq:
-        out.append(Rule("needed inputs: without these the agent can't act at all", style="dim"))
+        out.append(Rule("inputs: the call is made with data from these", style="dim"))
         for c in prereq:
             seg = c.finest.removed[-1]
             alt = c.finest.top_instead()
@@ -566,20 +586,23 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                 row.append(f"  instead: {compact(alt[0], 70)}", style="dim")
             out.append(row)
 
-    if not rep.causes and rep.joint is None and not rep.warnings:
+    if not rep.causes and rep.joint is None and not rep.stopped and rep.baseline.kept:
         out.append(Rule(style="yellow"))
-        out.append(Text(
-            "No piece of the context changes this decision when removed. It comes from the model's own "
-            "judgment given the task, not from something it read.",
-            style="yellow",
-        ))
+        if rep.untested:
+            msg = (f"None of the {len(rep.trials)} pieces tested changes this decision when removed. "
+                   f"{len(rep.untested)} less suspicious pieces were not tested (raise --max-pieces to include them).")
+        else:
+            msg = ("No piece of the context changes this decision when removed. It comes from the model's own "
+                   "judgment given the task, not from something it read.")
+        out.append(Text(msg, style="yellow"))
 
     shown = {id(c.top) for c in rep.causes}
-    partial = [x for x in rep.trials if rep.verdict(x) == "partial" and id(x) not in shown]
-    if partial:
-        out.append(Rule("partial influence", style="dim"))
-        for x in partial:
-            out.append(Text(f"  {x.label}  {_ratio(x.kept, x.n)}", style="yellow"))
+    weak = [x for x in rep.trials if rep.verdict(x) == "not significant" and id(x) not in shown]
+    if weak and show_all:
+        out.append(Rule("changed the decision in some reruns, but not significantly", style="dim"))
+        for x in weak:
+            out.append(Text(f"  {x.label}  {_ratio(x.kept, x.n)}" + (f"  p = {_p(x.p)}" if x.p is not None else ""),
+                            style="yellow"))
     rest = [x for x in rep.trials if rep.verdict(x) == "none" and id(x) not in shown]
     if rest:
         if show_all:
@@ -588,7 +611,7 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                 out.append(Text(f"  {x.label}  {_ratio(x.kept, x.n)}   {compact(x.removed[0].text, 50)}", style="dim"))
         else:
             out.append(Text(f"No effect when removed: {len(rest)} other pieces (--all to list).", style="dim"))
-    if rep.untested:
+    if rep.untested and (rep.causes or rep.joint):
         out.append(Text(f"Not tested: {len(rep.untested)} least suspicious pieces (raise --max-pieces to include them).", style="dim"))
     tail = f"{rep.calls} model calls, {rep.cache_hits} from cache."
     if rep.stopped:

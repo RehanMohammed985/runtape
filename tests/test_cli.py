@@ -202,11 +202,12 @@ def test_cli_why(demo):
     code, out = run("why", str(demo), "31", "--model-fn", SIM, "--no-cache")
     assert code == 0
     assert 'Why does the agent call issue_refund(order_id="B-2290", amount=2400.0)?' in out
-    assert "On the identical context it calls issue_refund in 5/5 reruns" in out
+    assert "On the identical context it calls issue_refund in 10/10 reruns" in out
     assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
     assert "masked" in out
-    assert 'Without it the agent calls issue_refund in 0/5 reruns and instead calls escalate_to_manager(order_id="B-2290") (5/5)' in out
-    assert "needed inputs" in out and "#28 lookup_order" in out
+    assert 'Without it the agent calls issue_refund in 0/10 reruns and instead calls escalate_to_manager(order_id="B-2290") (10/10)' in out
+    assert "inputs: the call is made with data from these" in out and "#28 lookup_order" in out
+    assert "significant after correcting for" in out
 
 
 def test_cli_why_json_and_cache(demo, tmp_path):
@@ -218,7 +219,7 @@ def test_cli_why_json_and_cache(demo, tmp_path):
     cause = data["causes"][0]
     assert cause["kind"] == "decisive" and cause["masked"] is True
     assert cause["chain"][-1]["removed"][0]["origin"] == 9
-    assert data["baseline"] == {"happens": 5, "runs": 5}
+    assert data["baseline"] == {"happens": 10, "runs": 10}
 
 
 def test_cli_rerun_and_odds(demo):

@@ -280,12 +280,14 @@ class Recorder:
             payload["api"] = api
 
         with self._lock:
+            # system and tools are written only when they change, including a change to none,
+            # so readers can carry them forward without inventing a prompt that wasn't sent
             sys_ser = json.dumps(to_jsonable(system), sort_keys=True)
-            if system is not None and self._last_system.get(provider) != sys_ser:
+            if self._last_system.get(provider, "null") != sys_ser:
                 payload["system"] = system
                 self._last_system[provider] = sys_ser
             tools_ser = json.dumps(to_jsonable(tools), sort_keys=True)
-            if tools is not None and self._last_tools.get(provider) != tools_ser:
+            if self._last_tools.get(provider, "null") != tools_ser:
                 payload["tools"] = tools
                 self._last_tools[provider] = tools_ser
 

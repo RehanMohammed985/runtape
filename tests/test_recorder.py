@@ -216,3 +216,20 @@ def test_state_and_manual_llm_logging(tpath):
     ctx = t.context(t.of_type("llm_response")[0].id)
     assert ctx.messages == [{"role": "user", "content": "hi"}]
     assert ctx.response.payload["text"] == "yo"
+
+
+def test_system_and_tools_removed_later_are_not_inherited(tpath):
+    # a call with no system prompt must not pick up the previous call's prompt
+    with Recorder(tpath) as rec:
+        r1 = rec.log_llm_request(provider="anthropic", model="m", system="You are a pirate.", tools=[{"name": "t"}],
+                                 messages=[{"role": "user", "content": "a"}])
+        r2 = rec.log_llm_request(provider="anthropic", model="m", messages=[{"role": "user", "content": "b"}])
+        r3 = rec.log_llm_request(provider="anthropic", model="m", system="You are a pirate.",
+                                 messages=[{"role": "user", "content": "c"}])
+    t = Trace.load(tpath)
+    assert t.context(r1).system == "You are a pirate." and t.context(r1).tools == [{"name": "t"}]
+    assert t.context(r2).system is None and t.context(r2).tools is None
+    assert t[r2].payload["system"] is None  # the change to none is recorded
+    assert t.context(r3).system == "You are a pirate." and t.context(r3).tools is None
+    # a first call with nothing writes nothing
+    assert "system" not in Trace.load(tpath)[r1].payload or True

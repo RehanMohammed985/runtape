@@ -36,8 +36,9 @@ payload:
 - api: the endpoint, so the call can be resent: "messages" (Anthropic), "chat.completions" or
   "responses" (OpenAI), "langchain" (OpenAI-style messages recorded through LangChain)
 - model
-- system: string or list, present only if it changed since the previous request
-- tools: list, present only if it changed since the previous request
+- system: string, list, or null; present only if it changed since the previous request from the
+  same provider (null means the call had no system prompt)
+- tools: list or null, same rule
 - messages: full message list, OR
 - base + messages_append: base is the id of an earlier llm_request whose
   resolved message list is a prefix of this one; messages_append holds the rest

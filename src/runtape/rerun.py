@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import threading
@@ -345,6 +346,27 @@ def load_model_fn(spec: str) -> Model:
 # ------------------------------------------------------------------ sampler
 
 
+def model_identity(model: Any) -> str:
+    """A stable name for a backend, including the source of a model function."""
+    if isinstance(model, FunctionModel):
+        fn = model.fn
+        name = f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
+        try:
+            src = inspect.getsource(fn)
+        except (OSError, TypeError):
+            src = repr(fn)
+        return "fn:" + name + ":" + hashlib.sha256(src.encode()).hexdigest()[:16]
+    return "api:" + type(model).__name__
+
+
+def server_side_context(req: dict) -> str | None:
+    """A warning when part of a call's context lives on the provider's servers, out of reach."""
+    if (req.get("params") or {}).get("previous_response_id") or (req.get("params") or {}).get("conversation"):
+        return ("This call continues a conversation stored on OpenAI's servers (previous_response_id). "
+                "Earlier turns are not in the trace, so they can't be tested or removed; they stay in every rerun.")
+    return None
+
+
 class BudgetExceeded(RuntimeError):
     pass
 
@@ -366,6 +388,7 @@ class Sampler:
         on_call: Callable[[], None] | None = None,
     ):
         self.model = model
+        self.model_id = model_identity(model)
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -379,7 +402,9 @@ class Sampler:
     def _cache_path(self, req: dict, i: int) -> Path | None:
         if not self.cache_dir:
             return None
-        return self.cache_dir / f"{request_key(req)[:40]}-{i}.json"
+        # the key covers the backend too, so switching models never reuses another model's replies
+        key = hashlib.sha256((self.model_id + "\n" + request_key(req)).encode()).hexdigest()
+        return self.cache_dir / f"{key[:40]}-{i}.json"
 
     def one(self, req: dict, i: int = 0) -> Reply:
         path = self._cache_path(req, i)
@@ -402,11 +427,33 @@ class Sampler:
         return reply
 
     def many(self, jobs: Iterable[tuple[dict, int]]) -> list[Reply]:
+        """Run jobs in parallel, in order. If the budget runs out, the replies that did arrive
+        (a leading run of them) are attached to the exception as .partial."""
         jobs = list(jobs)
+        out: list[Reply] = []
         if self.workers <= 1 or len(jobs) <= 1:
-            return [self.one(r, i) for r, i in jobs]
+            try:
+                for r, i in jobs:
+                    out.append(self.one(r, i))
+            except BudgetExceeded as e:
+                e.partial = out
+                raise
+            return out
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            return list(pool.map(lambda job: self.one(*job), jobs))
+            futures = [pool.submit(self.one, r, i) for r, i in jobs]
+            err = None
+            for f in futures:
+                try:
+                    res = f.result()
+                except BudgetExceeded as e:
+                    err = err or e
+                    continue
+                if err is None:
+                    out.append(res)
+            if err is not None:
+                err.partial = out
+                raise err
+            return out
 
     def samples(self, req: dict, k: int, start: int = 0) -> list[Reply]:
         return self.many((req, i) for i in range(start, start + k))
@@ -529,9 +576,12 @@ def rerun(
     elif not isinstance(model, (AnthropicModel, OpenAIChatModel, OpenAIResponsesModel, FunctionModel)):
         model = FunctionModel(model)
     sampler = Sampler(model, cache_dir=cache_dir, budget=budget, workers=workers)
-    k = 1 if is_deterministic(req) else runs
+    if runs < 1:
+        raise ValueError("runs must be at least 1")
+    k = min(runs, 2) if is_deterministic(req) else runs
     dist = Distribution(sampler.samples(req, k))
-    dist.notes = notes
+    warn = server_side_context(req)
+    dist.notes = notes + ([warn] if warn else [])
     dist.request_id, dist.response_id = rid, resp
     rp = trace[resp].payload if resp is not None else {}
     dist.recorded = Reply(rp.get("text"), list(rp.get("tool_calls") or []), rp.get("stop_reason")) if rp else None
