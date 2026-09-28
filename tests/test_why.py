@@ -581,3 +581,46 @@ def test_why_accepts_a_path(tmp_path):
     t = Trace.load(tmp_path / "t.jsonl")
     rep = why(str(tmp_path / "t.jsonl"), t.of_type("llm_response")[-1].id, model=FunctionModel(support_model), cache_dir=None)
     assert rep.baseline.n >= 5
+
+
+def test_origins_survive_trimmed_history(tmp_path):
+    rec = Recorder(tmp_path / "t.jsonl")
+    h = [{"role": "user", "content": "q1"}]
+    r1 = rec.log_llm_request(provider="anthropic", model="m", messages=h)
+    e1 = rec.log_llm_response(r1, text="a1", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1)
+    h = h + [{"role": "assistant", "content": "a1"}, {"role": "user", "content": "q2"}]
+    r2 = rec.log_llm_request(provider="anthropic", model="m", messages=h)
+    e2 = rec.log_llm_response(r2, text="a2", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1)
+    h = h + [{"role": "assistant", "content": "a2"}, {"role": "user", "content": "q3"}]
+    trimmed = h[1:]  # the agent drops its oldest message
+    r3 = rec.log_llm_request(provider="anthropic", model="m", messages=trimmed)
+    rec.log_llm_response(r3, text="a3", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1)
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+    segs = {s.text: s for s in extract(build_request(t, r3), t, r3)}
+    assert segs["a1"].origin == e1 and segs["a2"].origin == e2
+    assert segs["q2"].origin == r2 and segs["q3"].origin == r3
+
+
+def test_tool_calls_link_by_arguments(tmp_path):
+    rec = Recorder(tmp_path / "t.jsonl")
+
+    @rec.tool
+    def search(q):
+        return f"results for {q}"
+
+    rid = rec.log_llm_request(provider="anthropic", model="m", messages=[{"role": "user", "content": "x"}])
+    resp = rec.log_llm_response(rid, text=None, tool_calls=[
+        {"id": "c1", "name": "search", "arguments": {"q": "cats"}},
+        {"id": "c2", "name": "search", "arguments": {"q": "dogs"}}], stop_reason="tool_use", raw=None, latency_ms=1)
+    search("dogs")  # run out of order
+    search("cats")
+    search("birds")  # the model never asked for this one
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+    calls = {c.payload["arguments"]["q"]: c for c in t.of_type("tool_call")}
+    assert calls["dogs"].payload["call_id"] == "c2" and calls["cats"].payload["call_id"] == "c1"
+    assert "call_id" not in calls["birds"].payload and "requested_by" not in calls["birds"].meta
+    with pytest.raises(ValueError, match="wasn't requested by a model reply"):
+        request_for(t, calls["birds"].id)
+    assert request_for(t, calls["dogs"].id) == (rid, resp)

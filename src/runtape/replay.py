@@ -55,6 +55,32 @@ class Divergence:
         return f"{head}\n  recorded: {_short(self.recorded)}\n  now:      {_short(self.now)}"
 
 
+def _restore(value: Any, tag: str | None) -> Any:
+    """Rebuild a recorded tool result as the type the tool originally returned, when possible."""
+    if not tag or value is None:
+        return value
+    try:
+        if tag == "tuple":
+            return tuple(value)
+        if tag == "set":
+            return set(value)
+        kind, mod, qual = tag.split(":", 2)
+        if "<locals>" in qual:
+            return value
+        import importlib
+
+        obj = importlib.import_module(mod)
+        for part in qual.split("."):
+            obj = getattr(obj, part)
+        if kind == "dataclass":
+            return obj(**value)
+        if kind == "pydantic":
+            return obj.model_validate(value)
+    except Exception:
+        pass
+    return value
+
+
 def _short(v: Any, n: int = 300) -> str:
     s = v if isinstance(v, str) else json.dumps(to_jsonable(v), ensure_ascii=False)
     s = " ".join(s.split())
@@ -91,7 +117,7 @@ class Replayer(Recorder):
         self._reqs = self.source.of_type("llm_request")
         self._tool_calls = self.source.of_type("tool_call")
         self._ri = 0
-        self._ti = 0
+        self._used_tools: set[int] = set()
         self._live = False
 
     # ------------------------------------------------------------ helpers
@@ -123,6 +149,14 @@ class Replayer(Recorder):
         for key in ("model", "system", "tools"):
             if _canon(recorded[key]) != _canon(req.get(key)):
                 return Divergence("model_call", step, rec_ev.id, key, recorded[key], req.get(key))
+        from .rerun import _DROP_PARAMS
+
+        def settings(p):
+            return {k: v for k, v in (to_jsonable(p or {})).items() if k not in _DROP_PARAMS and v is not None}
+
+        if _canon(settings(rec_ev.payload.get("params"))) != _canon(settings(req.get("params"))):
+            return Divergence("model_call", step, rec_ev.id, "params",
+                              settings(rec_ev.payload.get("params")), settings(req.get("params")))
         a, b = recorded["messages"], to_jsonable(req.get("messages") or [])
         for i in range(max(len(a), len(b))):
             ra = a[i] if i < len(a) else "(missing)"
@@ -212,12 +246,22 @@ class Replayer(Recorder):
                         return obj
                     return done()
                 return obj
+            from .integrations import _AsyncStream, _SyncStream
+
             t0 = time.perf_counter()
             resp = original(*args, **kwargs)
+            stream = bool(kwargs.get("stream"))
             if inspect.isawaitable(resp):
                 async def finish():
-                    return go_live(rid, kwargs, t0, await resp)
+                    r = await resp
+                    if stream:
+                        rp.stats.live_model_calls += 1
+                        return _AsyncStream(r, adapter.stream(), rp, rid, t0)
+                    return go_live(rid, kwargs, t0, r)
                 return finish()
+            if stream:
+                rp.stats.live_model_calls += 1
+                return _SyncStream(resp, adapter.stream(), rp, rid, t0)
             return go_live(rid, kwargs, t0, resp)
 
         resource.create = wrapped
@@ -237,19 +281,24 @@ class Replayer(Recorder):
                 cid = self.log("tool_call", {"name": tool_name, "arguments": arguments})
                 if self._live:
                     return False, None, cid
-                step = self._ti + 1
-                if self._ti >= len(self._tool_calls):
-                    self._diverge(Divergence("tool_call", step, None, "call", "(no more recorded tool calls)",
-                                             {"name": tool_name, "arguments": arguments}))
+                # match any not-yet-used recorded call in the current turn with the same name and
+                # arguments: order within a turn and tools left unwrapped don't matter
+                limit = self._reqs[self._ri].id if self._ri < len(self._reqs) else float("inf")
+                window = [e for e in self._tool_calls if e.id < limit and e.id not in self._used_tools]
+                want = _canon(arguments)
+                rec = next((e for e in window if e.payload.get("name") == tool_name
+                            and _canon(e.payload.get("arguments")) == want), None)
+                step = len(self._used_tools) + 1
+                if rec is None:
+                    same = next((e for e in window if e.payload.get("name") == tool_name), None)
+                    if same is not None:
+                        self._diverge(Divergence("tool_call", step, same.id, "arguments", same.payload.get("arguments"), arguments))
+                    else:
+                        self._diverge(Divergence("tool_call", step, None, "call",
+                                                 "(no recorded call to this tool in this turn)",
+                                                 {"name": tool_name, "arguments": arguments}))
                     return False, None, cid
-                rec = self._tool_calls[self._ti]
-                if rec.payload.get("name") != tool_name:
-                    self._diverge(Divergence("tool_call", step, rec.id, "name", rec.payload.get("name"), tool_name))
-                    return False, None, cid
-                if _canon(rec.payload.get("arguments")) != _canon(arguments):
-                    self._diverge(Divergence("tool_call", step, rec.id, "arguments", rec.payload.get("arguments"), arguments))
-                    return False, None, cid
-                self._ti += 1
+                self._used_tools.add(rec.id)
                 res = next((e for e in self.source.children(rec.id) if e.type == "tool_result"), None)
                 self.stats.served_tool_calls += 1
                 return True, res, cid
@@ -258,11 +307,14 @@ class Replayer(Recorder):
                 if res is None:
                     self.log("tool_result", {"name": tool_name, "result": None}, parent=cid)
                     return None
-                self.log("tool_result", dict(res.payload), meta={"latency_ms": 0.0, "replayed_from": res.id}, parent=cid)
+                meta = {"latency_ms": 0.0, "replayed_from": res.id}
+                if res.meta.get("result_type"):
+                    meta["result_type"] = res.meta["result_type"]
+                self.log("tool_result", dict(res.payload), meta=meta, parent=cid)
                 if "error" in res.payload:
                     err = res.payload["error"]
                     raise RuntimeError(f"(replayed) {err.get('type')}: {err.get('message')}")
-                return res.payload.get("result")
+                return _restore(res.payload.get("result"), res.meta.get("result_type"))
 
             def run_live(call, cid):
                 self.stats.live_tool_calls += 1

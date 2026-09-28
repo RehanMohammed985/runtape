@@ -138,7 +138,7 @@ class RuntapeCallbackHandler(BaseCallbackHandler):
         name = (serialized or {}).get("name") or kwargs.get("name") or "tool"
         payload: dict[str, Any] = {"name": name, "arguments": inputs if inputs is not None else input_str}
         meta: dict[str, Any] = {}
-        linked = self.rec._claim_tool_call(name)
+        linked = self.rec._claim_tool_call(name, inputs)
         if linked:
             payload["call_id"] = linked["id"]
             meta["requested_by"] = linked["response_event"]

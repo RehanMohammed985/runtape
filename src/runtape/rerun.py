@@ -64,15 +64,13 @@ def request_for(trace: Trace, event_id: int) -> tuple[int, int | None]:
     if ev.type == "tool_call":
         rid = ev.meta.get("requested_by")
         if rid is None:
-            # unlinked tool: the latest model reply that asked for a tool of this name
-            for e in reversed(trace.events):
-                if e.id < ev.id and e.type == "llm_response" and any(
-                    tc.get("name") == ev.payload.get("name") for tc in e.payload.get("tool_calls") or []
-                ):
-                    rid = e.id
-                    break
-        if rid is None:
-            raise ValueError(f"#{event_id}: can't find the model reply that requested this tool call")
+            # never guess: an unlinked call was run by code, or with arguments the model didn't ask for
+            prev = next((e.id for e in reversed(trace.events) if e.id < ev.id and e.type == "llm_response"), None)
+            hint = f" Point at the model reply instead, e.g. #{prev}." if prev is not None else ""
+            raise ValueError(
+                f"#{event_id} ({ev.payload.get('name')}) wasn't requested by a model reply in this trace: it was "
+                f"called by code, or with arguments different from what the model asked for.{hint}"
+            )
         return trace[rid].parent, rid
     if ev.type == "tool_result" and ev.parent is not None:
         return request_for(trace, ev.parent)

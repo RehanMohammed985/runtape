@@ -306,3 +306,79 @@ def test_summary(tpath):
     assert s["tool_calls"] == {"boom": 1}
     assert s["tool_errors"] == 1
     assert s["status"] == "ok"
+
+
+# ------------------------------------------------------- more entry points
+
+
+def _anthropic_sse(text="Hi there", tool=None):
+    ev = [
+        {"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "model": "claude-test",
+                                              "content": [], "stop_reason": None, "stop_sequence": None,
+                                              "usage": {"input_tokens": 4, "output_tokens": 0}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    ]
+    return ev
+
+
+def test_anthropic_messages_stream_helper_is_recorded(tpath):
+    script = Script([_anthropic_sse("streamed hello")])
+    rec = Recorder(tpath)
+    client = rec.wrap(anthropic_client(script))
+    with client.messages.stream(model="claude-test", max_tokens=20, messages=[{"role": "user", "content": "x"}]) as s:
+        got = "".join(s.text_stream)
+    rec.close()
+    assert got == "streamed hello"
+    t = Trace.load(tpath)
+    assert len(t.of_type("llm_request")) == 1
+    r = t.of_type("llm_response")[0]
+    assert r.payload["text"] == "streamed hello" and r.meta["tokens"]["output"] == 3
+
+
+def test_anthropic_beta_create_is_recorded(tpath):
+    script = Script([an_msg("beta hi")])
+    rec = Recorder(tpath)
+    client = rec.wrap(anthropic_client(script))
+    client.beta.messages.create(model="claude-test", max_tokens=20, messages=[{"role": "user", "content": "x"}])
+    rec.close()
+    assert Trace.load(tpath).of_type("llm_response")[0].payload["text"] == "beta hi"
+
+
+def test_openai_stream_helper_and_parse_recorded_once(tpath):
+    def chunk(delta, finish=None):
+        return {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "gpt-test",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+    script = Script([[chunk({"role": "assistant", "content": "str"}), chunk({"content": "eamed"}, "stop"), "[DONE]"],
+                     oa_chat("parsed")])
+    rec = Recorder(tpath)
+    client = rec.wrap(openai_client(script))
+    with client.chat.completions.stream(model="gpt-test", messages=[{"role": "user", "content": "x"}]) as s:
+        for _ in s:
+            pass
+    client.chat.completions.parse(model="gpt-test", messages=[{"role": "user", "content": "y"}])
+    rec.close()
+    t = Trace.load(tpath)
+    assert len(t.of_type("llm_request")) == 2  # not double-logged
+    texts = [e.payload["text"] for e in t.of_type("llm_response")]
+    assert texts == ["streamed", "parsed"]
+
+
+def test_next_on_recorded_stream(tpath):
+    def chunk(c):
+        return {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "delta": {"content": c}, "finish_reason": None}]}
+
+    script = Script([[chunk("a"), chunk("b"), "[DONE]"]])
+    rec = Recorder(tpath)
+    s = rec.wrap(openai_client(script)).chat.completions.create(model="m", messages=[], stream=True)
+    assert next(s).choices[0].delta.content == "a"
+    assert next(s).choices[0].delta.content == "b"
+    with pytest.raises(StopIteration):
+        next(s)
+    rec.close()
+    assert Trace.load(tpath).of_type("llm_response")[0].payload["text"] == "ab"

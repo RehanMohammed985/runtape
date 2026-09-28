@@ -211,30 +211,40 @@ def extract(req: dict, trace: Trace | None = None, request_id: int | None = None
 
 
 def _origin_maps(trace: Trace, request_id: int) -> dict:
-    """Where each message of a request came from in the trace."""
-    # message index -> request event that first included it (walk the delta chain)
-    chain = []
-    cur = request_id
-    while cur is not None:
-        chain.append(cur)
-        cur = trace[cur].payload.get("base")
-    chain.reverse()
-    intro: list[int] = []
-    for rid in chain:
-        n = len(trace.messages(rid))
-        intro.extend([rid] * (n - len(intro)))
-    # call id -> (tool_result event, tool name)
+    """Where each message of a request came from in the trace.
+
+    Matches messages by content, not position, so labels stay right when an agent trims or
+    rewrites its history between calls.
+    """
+    import bisect
+
+    first_seen: dict[str, int] = {}  # canonical message -> first request that sent it
+    for e in trace.events:
+        if e.id > request_id:
+            break
+        if e.type != "llm_request":
+            continue
+        new = e.payload.get("messages") if "messages" in e.payload else e.payload.get("messages_append", [])
+        for m in new or []:
+            first_seen.setdefault(json.dumps(m, sort_keys=True), e.id)
+    msgs = trace.messages(request_id)
+    intro = [first_seen.get(json.dumps(m, sort_keys=True), request_id) for m in msgs]
+
+    # call id -> [(tool_result event, tool name)] in order; ids can repeat across a run
     calls: dict[str, list[tuple[int, str]]] = {}
     for e in trace.events:
         if e.type == "tool_call" and e.payload.get("call_id"):
             res = next((c for c in trace.children(e.id) if c.type == "tool_result"), None)
             calls.setdefault(e.payload["call_id"], []).append(((res or e).id, e.payload.get("name")))
-    # assistant message index -> the llm_response that produced it
+
+    # assistant message -> the model reply just before the request that first carried it
+    responses = [e.id for e in trace.events if e.type == "llm_response"]
     assistant: dict[int, int] = {}
     for i, rid in enumerate(intro):
-        prev = [e.id for e in trace.events if e.type == "llm_response" and e.id < rid]
-        if prev:
-            assistant[i] = prev[-1]
+        k = bisect.bisect_left(responses, rid)
+        if k:
+            assistant[i] = responses[k - 1]
+
     system_origin = None
     for e in trace.events:
         if e.id > request_id:

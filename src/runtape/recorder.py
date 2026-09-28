@@ -182,7 +182,7 @@ class Recorder:
                 arguments = _bind(sig, args, kwargs)
                 payload: dict = {"name": tool_name, "arguments": arguments}
                 meta: dict = {}
-                linked = self._claim_tool_call(tool_name)
+                linked = self._claim_tool_call(tool_name, arguments)
                 if linked:
                     payload["call_id"] = linked["id"]
                     meta["requested_by"] = linked["response_event"]
@@ -198,6 +198,9 @@ class Recorder:
                         parent=cid,
                     )
                 else:
+                    tag = _type_tag(result)
+                    if tag:
+                        meta["result_type"] = tag  # lets replay hand back the original type
                     self.log(
                         "tool_result", {"name": tool_name, "result": result}, meta=meta, parent=cid
                     )
@@ -236,11 +239,27 @@ class Recorder:
             return decorate(fn)
         return decorate
 
-    def _claim_tool_call(self, tool_name: str) -> dict | None:
+    def _claim_tool_call(self, tool_name: str, arguments: Any = None) -> dict | None:
+        """Link a tool run to the model reply that asked for it.
+
+        Matches on name and arguments, newest request first. A run whose arguments don't match
+        anything the model asked for (called by code, or with changed arguments) is left unlinked
+        rather than guessed.
+        """
+        want = _canon_args(arguments)
         with self._lock:
-            for i, tc in enumerate(self._pending_tool_calls):
-                if tc["name"] == tool_name:
+            same_name = [i for i, tc in enumerate(self._pending_tool_calls) if tc["name"] == tool_name]
+            for i in reversed(same_name):
+                if _canon_args(self._pending_tool_calls[i]["arguments"]) == want:
                     return self._pending_tool_calls.pop(i)
+            # model args are a subset of the bound call (the code filled in defaults)
+            if isinstance(arguments, dict):
+                for i in reversed(same_name):
+                    asked = self._pending_tool_calls[i]["arguments"]
+                    if isinstance(asked, dict) and asked and all(
+                        _canon_args(arguments.get(k)) == _canon_args(v) for k, v in asked.items()
+                    ):
+                        return self._pending_tool_calls.pop(i)
         return None
 
     # ------------------------------------------------------------------- llm
@@ -329,10 +348,12 @@ class Recorder:
                 meta={"latency_ms": round(latency_ms, 2), "tokens": tokens or {}, "model": model},
                 parent=request_id,
             )
-            self._pending_tool_calls = [
-                {"id": tc.get("id"), "name": tc.get("name"), "response_event": eid}
+            # keep unclaimed requests from earlier replies too: several agents can share a recorder
+            self._pending_tool_calls.extend(
+                {"id": tc.get("id"), "name": tc.get("name"), "arguments": tc.get("arguments"), "response_event": eid}
                 for tc in tool_calls
-            ]
+            )
+            del self._pending_tool_calls[:-200]
         return eid
 
 
@@ -364,6 +385,30 @@ def _install_excepthook() -> None:
 
 
 
+def _type_tag(v: Any) -> str | None:
+    """How to rebuild a tool result that JSON can't represent exactly."""
+    import dataclasses as _dc
+
+    if isinstance(v, tuple) and not hasattr(v, "_fields"):
+        return "tuple"
+    if isinstance(v, (set, frozenset)):
+        return "set"
+    cls = type(v)
+    where = f"{cls.__module__}:{cls.__qualname__}"
+    if _dc.is_dataclass(v) and not isinstance(v, type):
+        return "dataclass:" + where
+    if hasattr(cls, "model_validate") and hasattr(v, "model_dump"):
+        return "pydantic:" + where
+    return None
+
+
+def _canon_args(v: Any) -> str:
+    try:
+        return json.dumps(to_jsonable(v), sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return repr(v)
+
+
 def _exc_payload(exc: BaseException) -> dict:
     return {
         "type": type(exc).__name__,
@@ -383,9 +428,13 @@ def _bind(sig, args, kwargs) -> dict:
     if sig is not None:
         try:
             bound = sig.bind(*args, **kwargs)
-            out = dict(bound.arguments)
-            out.pop("self", None)
-            out.pop("cls", None)
+            out: dict = {}
+            for name, val in bound.arguments.items():
+                kind = sig.parameters[name].kind
+                if kind is inspect.Parameter.VAR_KEYWORD:
+                    out.update(val)  # f(**kw): record the keywords themselves, as the model sent them
+                elif name not in ("self", "cls"):
+                    out[name] = val
             return out
         except TypeError:
             pass

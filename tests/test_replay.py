@@ -1,4 +1,6 @@
 """Replaying a recorded run through the real agent code."""
+from dataclasses import dataclass
+
 import anthropic
 import pytest
 
@@ -58,19 +60,84 @@ def test_prompt_change_stops_at_first_difference(recorded, tmp_path):
     assert Trace.load(tmp_path / "r.jsonl").status == "diverged"
 
 
-def test_tool_argument_change_is_caught(recorded, tmp_path):
-    ex, orig = recorded
-    src = Trace.load(orig)
-    with pytest.raises(ReplayDiverged) as err:
-        with runtape.replay(src, tmp_path / "r.jsonl") as rp:
-            @rp.tool
-            def lookup_order(order_id):
-                return {}
+def _record_one_turn(path, *, tools):
+    """Record: one model call that asks for tools, then those tools run."""
+    calls = [(f"t{i}", name, args) for i, (name, args) in enumerate(tools)]
+    s = Script([an_msg(tool_uses=calls, stop="tool_use")])
+    rec = runtape.record(path)
+    c = rec.wrap(anthropic_client(s))
+    fns = {}
+    for name in {n for n, _ in tools}:
+        fns[name] = rec.tool(name=name)(lambda **kw: {"echo": kw})
+    r = c.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "go"}])
+    for b in r.content:
+        fns[b.name](**b.input)
+    rec.close()
 
-            lookup_order("A-1042")  # matches recorded tool call 1
-            lookup_order("WRONG")  # recorded call 2 is search_kb
+
+def test_tool_argument_change_is_caught(tmp_path):
+    _record_one_turn(tmp_path / "o.jsonl", tools=[("lookup", {"order_id": "A"})])
+    with pytest.raises(ReplayDiverged) as err:
+        with runtape.replay(tmp_path / "o.jsonl", tmp_path / "r.jsonl") as rp:
+            c = rp.wrap(anthropic_client(Script([])))
+            c.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "go"}])
+            rp.tool(name="lookup")(lambda **kw: None)(order_id="WRONG")
     d = err.value.divergence
-    assert d.kind == "tool_call" and d.step == 2 and d.field == "name"
+    assert d.kind == "tool_call" and d.field == "arguments"
+    assert d.recorded == {"order_id": "A"} and d.now == {"order_id": "WRONG"}
+
+
+def test_parallel_tools_in_any_order_and_unwrapped_tools(tmp_path):
+    _record_one_turn(tmp_path / "o.jsonl", tools=[("search", {"q": "cats"}), ("search", {"q": "dogs"}), ("log", {"m": "x"})])
+    with runtape.replay(tmp_path / "o.jsonl", tmp_path / "r.jsonl") as rp:
+        c = rp.wrap(anthropic_client(Script([])))
+        c.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "go"}])
+        search = rp.tool(name="search")(lambda **kw: None)
+        dogs = search(q="dogs")  # opposite order from the recording
+        cats = search(q="cats")
+        # "log" is never wrapped or called in the replay: fine
+    assert dogs == {"echo": {"q": "dogs"}} and cats == {"echo": {"q": "cats"}}
+    assert rp.stats.divergence is None and rp.stats.served_tool_calls == 2
+
+
+def test_changed_request_settings_diverge(tmp_path):
+    s = Script([an_msg("x")])
+    rec = runtape.record(tmp_path / "o.jsonl")
+    rec.wrap(anthropic_client(s)).messages.create(model="m", max_tokens=100, messages=[{"role": "user", "content": "x"}])
+    rec.close()
+    with pytest.raises(ReplayDiverged) as err:
+        with runtape.replay(tmp_path / "o.jsonl", tmp_path / "r.jsonl") as rp:
+            rp.wrap(anthropic_client(Script([]))).messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "x"}])
+    assert err.value.divergence.field == "params"
+
+
+@dataclass
+class Order:
+    id: str
+    total: float
+
+
+def test_replay_returns_original_types(tmp_path):
+    rec = runtape.record(tmp_path / "o.jsonl")
+
+    @rec.tool
+    def get_order():
+        return Order("A", 18.0)
+
+    @rec.tool
+    def pair():
+        return (1, 2)
+
+    get_order()
+    pair()
+    rec.close()
+    src = Trace.load(tmp_path / "o.jsonl")
+    # no model calls in this recording, so every tool call is in the same "turn"
+    with runtape.replay(src, tmp_path / "r.jsonl") as rp:
+        o = rp.tool(name="get_order")(lambda: None)()
+        p = rp.tool(name="pair")(lambda: None)()
+    assert isinstance(o, Order) and o.total == 18.0
+    assert p == (1, 2) and isinstance(p, tuple)
 
 
 def test_diverge_live_goes_to_real_model(tmp_path):

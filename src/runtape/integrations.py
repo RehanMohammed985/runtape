@@ -22,15 +22,28 @@ _MARK = "__runtape_wrapped__"
 def wrap_client(rec: "Recorder", client: Any) -> Any:
     mod = type(client).__module__.split(".")[0]
     if mod == "openai":
+        # .stream() helpers call .create(stream=True) internally, so they are covered by create
         chat = getattr(getattr(client, "chat", None), "completions", None)
         if chat is not None:
             _patch(rec, chat, "create", "openai", _OpenAIChat)
+            if hasattr(chat, "parse"):
+                _patch(rec, chat, "parse", "openai", _OpenAIChat)
+        beta_chat = getattr(getattr(getattr(client, "beta", None), "chat", None), "completions", None)
+        if beta_chat is not None and beta_chat is not chat and hasattr(beta_chat, "parse"):
+            _patch(rec, beta_chat, "parse", "openai", _OpenAIChat)
         responses = getattr(client, "responses", None)
         if responses is not None and hasattr(responses, "create"):
             _patch(rec, responses, "create", "openai", _OpenAIResponses)
+            if hasattr(responses, "parse"):
+                _patch(rec, responses, "parse", "openai", _OpenAIResponses)
         return client
     if mod == "anthropic":
-        _patch(rec, client.messages, "create", "anthropic", _Anthropic)
+        for res in (client.messages, getattr(getattr(client, "beta", None), "messages", None)):
+            if res is None:
+                continue
+            _patch(rec, res, "create", "anthropic", _Anthropic)
+            if hasattr(res, "stream"):
+                _patch_manager(rec, res, "stream", "anthropic", _Anthropic, "get_final_message")
         return client
     raise TypeError(
         f"runtape.wrap doesn't know {type(client).__module__}.{type(client).__name__}. "
@@ -89,6 +102,75 @@ def _patch(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: ty
     setattr(resource, attr, wrapped)
 
 
+def _patch_manager(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: type, final: str) -> None:
+    """Record SDK stream helpers used as context managers (anthropic messages.stream())."""
+    original = getattr(resource, attr)
+    if getattr(original, _MARK, False):
+        return
+
+    @functools.wraps(original)
+    def wrapped(*args, **kwargs):
+        return _ManagerProxy(rec, original(*args, **kwargs), provider, adapter, kwargs, final)
+
+    setattr(wrapped, _MARK, True)
+    setattr(resource, attr, wrapped)
+
+
+class _ManagerProxy:
+    def __init__(self, rec, mgr, provider, adapter, kwargs, final):
+        self._rec, self._mgr, self._provider, self._adapter = rec, mgr, provider, adapter
+        self._kwargs, self._final = kwargs, final
+        self._rid = None
+        self._stream = None
+
+    def _start(self):
+        req = self._adapter.request(self._kwargs)
+        self._rid = self._rec.log_llm_request(provider=self._provider, api=self._adapter.api, **req)
+        self._t0 = time.perf_counter()
+
+    def _log(self, final_obj, exc):
+        if exc is not None:
+            self._rec.error(exc, parent=self._rid)
+        if final_obj is not None:
+            out = self._adapter.response(final_obj)
+        else:
+            out = {"text": None, "tool_calls": [], "stop_reason": "interrupted", "raw": {"streamed": True}}
+        self._rec.log_llm_response(self._rid, latency_ms=(time.perf_counter() - self._t0) * 1000, **out)
+
+    def __enter__(self):
+        self._start()
+        self._stream = self._mgr.__enter__()
+        return self._stream
+
+    def __exit__(self, et, ev, tb):
+        final_obj = None
+        if ev is None:
+            try:
+                final_obj = getattr(self._stream, self._final)()
+            except Exception:
+                final_obj = None
+        self._log(final_obj, ev)
+        return self._mgr.__exit__(et, ev, tb)
+
+    async def __aenter__(self):
+        self._start()
+        self._stream = await self._mgr.__aenter__()
+        return self._stream
+
+    async def __aexit__(self, et, ev, tb):
+        final_obj = None
+        if ev is None:
+            try:
+                final_obj = await getattr(self._stream, self._final)()
+            except Exception:
+                final_obj = None
+        self._log(final_obj, ev)
+        return await self._mgr.__aexit__(et, ev, tb)
+
+    def __getattr__(self, name):
+        return getattr(self._mgr, name)
+
+
 # ---------------------------------------------------------------- streams
 
 
@@ -100,6 +182,7 @@ class _StreamBase:
         self._rid = rid
         self._t0 = t0
         self._done = False
+        self._gen = None
 
     def _finish(self, exc: BaseException | None = None):
         if self._done:
@@ -119,6 +202,11 @@ class _StreamBase:
 
 
 class _SyncStream(_StreamBase):
+    def __next__(self):  # next(stream) works like on the SDK's own stream
+        if self._gen is None:
+            self._gen = self.__iter__()
+        return next(self._gen)
+
     def __iter__(self):
         try:
             for chunk in self._inner:
@@ -150,6 +238,11 @@ class _SyncStream(_StreamBase):
 
 
 class _AsyncStream(_StreamBase):
+    async def __anext__(self):
+        if self._gen is None:
+            self._gen = self.__aiter__()
+        return await self._gen.__anext__()
+
     async def __aiter__(self):
         try:
             async for chunk in self._inner:
