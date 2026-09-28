@@ -65,6 +65,7 @@ class RuntapeCallbackHandler(BaseCallbackHandler):
         inv = kwargs.get("invocation_params") or {}
         rid = self.rec.log_llm_request(
             provider=(metadata or {}).get("ls_provider") or "langchain",
+            api="langchain",
             model=_model_name(serialized, {**kwargs, "metadata": metadata}),
             messages=_to_dicts(messages[0] if messages else []),
             tools=inv.get("tools"),

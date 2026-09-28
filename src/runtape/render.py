@@ -464,3 +464,149 @@ def show_summary(trace: Trace) -> RenderableType:
         parts.append(Rule("errors", style="red"))
         parts.append(timeline(trace, sorted(errs, key=lambda e: e.id)))
     return Panel(Group(*parts), title="summary", title_align="left")
+
+
+# ------------------------------------------------------------------- why
+
+
+def _ratio(kept: int, n: int) -> str:
+    return f"{kept}/{n}"
+
+
+def _path(c) -> str:
+    """Narrowing path of a cause, e.g. '#9 search_kb result > [1] > [1].text > sentence 2'."""
+    parts = []
+    for i, t in enumerate(c.chain):
+        seg = t.removed[-1]
+        label = seg.where if i == 0 else (seg.sub.split(" ")[-2] + " " + seg.sub.split(" ")[-1] if seg.span and " " in seg.sub else seg.sub)
+        parts.append(f"{label} ({_ratio(t.kept, t.n)})")
+    return " > ".join(parts)
+
+
+def show_why(rep, *, show_all: bool = False) -> RenderableType:
+    t = rep.trace
+    tgt = rep.target
+    out: list[RenderableType] = []
+    head = Text("Why does the agent ", style="bold")
+    if tgt.mode == "tool":
+        call = next((tc for tc in tgt.recorded.tool_calls if tc.get("name") == tgt.tool), None)
+        from .rerun import Reply as _R
+
+        what = _R(None, [call]).describe(100) if call else tgt.describe()
+    else:
+        what = tgt.describe()
+    head.append(what.replace("calls ", "call ", 1) if what.startswith("calls ") else what, style="bold yellow")
+    head.append("?", style="bold")
+    out.append(head)
+    req = t[tgt.request_id]
+    out.append(Text(
+        f"decision at #{tgt.response_id}, model call #{tgt.request_id} ({req.payload.get('model')}), "
+        f"{len(rep.trials)} pieces of context tested",
+        style="dim",
+    ))
+    b = rep.baseline
+    stable = "green" if rep.base >= 0.8 else "yellow" if rep.base >= 0.6 else "red"
+    line = Text("Rerun on the identical context: ")
+    line.append(f"happens {_ratio(b.kept, b.n)}", style=f"bold {stable}")
+    if b.instead:
+        alt, cnt = b.top_instead()
+        line.append(f"   otherwise {alt} ({cnt})", style="dim")
+    out.append(line)
+    for w in rep.warnings:
+        out.append(Text("! " + w, style="yellow"))
+
+    decisive = [c for c in rep.causes if c.kind == "decisive"]
+    prereq = [c for c in rep.causes if c.kind != "decisive"]
+
+    for c in decisive:
+        out.append(Rule(style="red"))
+        seg = c.finest.removed[-1]
+        h = Text("CAUSE  ", style="bold red")
+        h.append(seg.where, style="bold")
+        if c.masked:
+            h.append("   masked", style="bold magenta")
+        out.append(h)
+        out.append(Text("  " + clip('"' + " ".join(seg.text.split()) + '"', 400)))
+        r = Text("  Without it: ")
+        r.append(f"{tgt.describe()} {_ratio(c.finest.kept, c.finest.n)}", style="bold")
+        if c.finest.top_instead():
+            alt, cnt = c.finest.top_instead()
+            r.append("   instead: ")
+            r.append(f"{alt} ({cnt}/{c.finest.n})", style="bold green")
+        out.append(r)
+        if len(c.chain) > 1:
+            out.append(Text("  Narrowed down: " + _path(c), style="dim"))
+        if c.masked:
+            out.append(Text(
+                "  Masked: removing all of " + c.top.removed[-1].where + " changes nothing, because other parts of it "
+                "push the other way. Removing whole messages or tool results would never find this.",
+                style="magenta",
+            ))
+
+    if rep.joint is not None:
+        j = rep.joint.finest
+        out.append(Rule(style="red"))
+        out.append(Text("CAUSE (combined)  no single piece explains it; together these do:", style="bold red"))
+        for seg in j.removed:
+            out.append(Text(f"  {seg.where}  " + compact(seg.text, 90)))
+        r = Text("  Without all of them: ")
+        r.append(f"{tgt.describe()} {_ratio(j.kept, j.n)}", style="bold")
+        if j.top_instead():
+            r.append(f"   instead: {j.top_instead()[0]}", style="green")
+        out.append(r)
+
+    if prereq:
+        out.append(Rule("needed inputs: without these the agent can't act at all", style="dim"))
+        for c in prereq:
+            seg = c.finest.removed[-1]
+            alt = c.finest.top_instead()
+            row = Text(f"  {seg.where}  ", style="bold")
+            row.append(f"{_ratio(c.finest.kept, c.finest.n)}", style="dim")
+            if alt:
+                row.append(f"  instead: {compact(alt[0], 70)}", style="dim")
+            out.append(row)
+
+    if not rep.causes and rep.joint is None and not rep.warnings:
+        out.append(Rule(style="yellow"))
+        out.append(Text(
+            "No piece of the context changes this decision when removed. It comes from the model's own "
+            "judgment given the task, not from something it read.",
+            style="yellow",
+        ))
+
+    shown = {id(c.top) for c in rep.causes}
+    partial = [x for x in rep.trials if rep.verdict(x) == "partial" and id(x) not in shown]
+    if partial:
+        out.append(Rule("partial influence", style="dim"))
+        for x in partial:
+            out.append(Text(f"  {x.label}  {_ratio(x.kept, x.n)}", style="yellow"))
+    rest = [x for x in rep.trials if rep.verdict(x) == "none" and id(x) not in shown]
+    if rest:
+        if show_all:
+            out.append(Rule("no effect when removed", style="dim"))
+            for x in rest:
+                out.append(Text(f"  {x.label}  {_ratio(x.kept, x.n)}   {compact(x.removed[0].text, 50)}", style="dim"))
+        else:
+            out.append(Text(f"No effect when removed: {len(rest)} other pieces (--all to list).", style="dim"))
+    if rep.untested:
+        out.append(Text(f"Not tested: {len(rep.untested)} least suspicious pieces (raise --max-pieces to include them).", style="dim"))
+    tail = f"{rep.calls} model calls, {rep.cache_hits} from cache."
+    if rep.stopped:
+        tail += f" Stopped early: {rep.stopped}. Raise --budget to finish."
+    out.append(Text(tail, style="dim"))
+    return Group(*out)
+
+
+def show_distribution(dist, recorded, *, title: str) -> RenderableType:
+    out: list[RenderableType] = [Text(title, style="bold")]
+    if recorded is not None:
+        out.append(Text("recorded:  " + recorded.describe(120), style="dim"))
+    n = len(dist)
+    for desc, cnt in dist.counts().most_common():
+        same = recorded is not None and desc == recorded.describe(200)
+        row = Text(f"  {cnt}/{n}  ", style="bold")
+        row.append(compact(desc, 120), style="cyan" if same else "green")
+        if same:
+            row.append("  (same as recorded)", style="dim")
+        out.append(row)
+    return Group(*out)

@@ -267,11 +267,17 @@ class Recorder:
         system: Any = None,
         tools: Any = None,
         params: dict | None = None,
+        api: str | None = None,
     ) -> int:
-        """Record a model call. Messages are delta-encoded against earlier requests."""
+        """Record a model call. Messages are delta-encoded against earlier requests.
+
+        api names the endpoint so the call can be replayed later:
+        "messages" (Anthropic), "chat.completions" or "responses" (OpenAI)."""
         msgs = to_jsonable(messages or [])
         ser = [json.dumps(m, sort_keys=True) for m in msgs]
         payload: dict = {"provider": provider, "model": model}
+        if api:
+            payload["api"] = api
 
         with self._lock:
             sys_ser = json.dumps(to_jsonable(system), sort_keys=True)

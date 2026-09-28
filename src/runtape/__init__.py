@@ -1,6 +1,8 @@
 """runtape: a flight recorder for AI agents."""
 from .recorder import FORMAT_VERSION, Recorder, current
 from .trace import Context, Event, Hit, Trace
+from .rerun import Distribution, Reply, rerun
+from .why import why
 
 __version__ = "0.1.0"
 
@@ -24,5 +26,9 @@ __all__ = [
     "load",
     "current",
     "FORMAT_VERSION",
+    "rerun",
+    "why",
+    "Reply",
+    "Distribution",
     "__version__",
 ]

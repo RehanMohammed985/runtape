@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import cmd
+import json
 import os
 import shlex
 import sys
@@ -72,6 +73,85 @@ def resolve_event(trace: Trace, arg: str | int) -> int:
     return n
 
 
+# ------------------------------------------------------------ experiments
+
+
+def _model(spec: str | None):
+    if not spec:
+        return None
+    from .rerun import load_model_fn
+
+    return load_model_fn(spec)
+
+
+def _parse_replace(items: list[str] | None) -> dict[str, str]:
+    out = {}
+    for it in items or []:
+        if "=>" not in it:
+            raise SystemExit(f"--replace needs OLD=>NEW, got '{it}'")
+        old, new = it.split("=>", 1)
+        out[old] = new
+    return out
+
+
+def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
+            model_fn=None, budget=300, cache=True, yes=False, show_all=False, json_out=None,
+            max_pieces=40) -> int:
+    from .rerun import build_request, request_for
+    from .why import estimate_calls, why
+
+    model = _model(model_fn)
+    rid, _ = request_for(trace, event)
+    likely, worst = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces)
+    live = model is None
+    if live:
+        req = build_request(trace, rid)
+        resp = next((e for e in trace.children(rid) if e.type == "llm_response"), None)
+        tin = ((resp.meta.get("tokens") or {}).get("input") if resp else None) or 0
+        tok = f", roughly {likely * tin / 1e6:.1f}M input tokens" if tin else ""
+        c.print(Text(
+            f"This reruns model call #{rid} ({req.get('model')}) about {likely} times "
+            f"(at most {min(worst, budget)}){tok}. Results are cached, so repeats are free.",
+            style="dim",
+        ))
+        if not yes and sys.stdin.isatty():
+            if input("Continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+                return 1
+    counter = {"n": 0}
+    with c.status("starting") as status:
+        def progress(msg: str) -> None:
+            status.update(f"{msg}  ({counter['n']} model calls)")
+
+        def on_call() -> None:
+            counter["n"] += 1
+
+        rep = why(trace, event, model=model, runs=runs, tool=tool, match=match, exact_args=exact_args,
+                  budget=budget, cache_dir=".runtape/cache" if cache else None, max_pieces=max_pieces,
+                  progress=progress, on_call=on_call)
+    c.print(render.show_why(rep, show_all=show_all))
+    if json_out:
+        Path(json_out).write_text(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
+        c.print(Text(f"report written to {json_out}", style="dim"))
+    return 0
+
+
+def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replace=None, system=None,
+              system_file=None, model_name=None, model_fn=None, cache=True, title=None) -> int:
+    from .rerun import rerun
+
+    if system_file:
+        system = Path(system_file).read_text()
+    with c.status("rerunning"):
+        dist = rerun(trace, event, runs=runs, drop=drop or [], replace=_parse_replace(replace), system=system,
+                     model_name=model_name, model=_model(model_fn), cache_dir=".runtape/cache" if cache else None)
+    what = "; ".join(dist.notes) if dist.notes else "unchanged context"
+    c.print(render.show_distribution(
+        dist, dist.recorded,
+        title=title or f"rerun of decision #{dist.response_id} ({what}), {len(dist)} runs",
+    ))
+    return 0
+
+
 # ------------------------------------------------------------ interactive
 
 
@@ -86,6 +166,7 @@ class Replay(cmd.Cmd):
         self.ids = [e.id for e in trace.events]
         self.pos = self.ids.index(start) if start in self.ids else 0
         self.term: str | None = None  # last grep term, highlighted everywhere
+        self.model_fn: str | None = None  # --model-fn for why/rerun/odds
         self.last_cmd_was_move = True
 
     # -- helpers
@@ -297,6 +378,58 @@ class Replay(cmd.Cmd):
         else:
             self.c.print(render.timeline(self.trace, errs, cursor=self.cur, width=self.row_width))
 
+    def _exp_args(self, arg: str, prog: str):
+        p = argparse.ArgumentParser(prog=prog, add_help=False, exit_on_error=False)
+        p.add_argument("event", nargs="?")
+        p.add_argument("--runs", type=int, default=5)
+        p.add_argument("--tool")
+        p.add_argument("--match")
+        p.add_argument("--all", action="store_true")
+        p.add_argument("--drop", action="append")
+        p.add_argument("--replace", action="append")
+        p.add_argument("--system-file")
+        p.add_argument("--model")
+        try:
+            a = p.parse_args(shlex.split(arg))
+        except (argparse.ArgumentError, SystemExit, ValueError) as e:
+            self.c.print(Text(f"{prog}: {e}", style="red"))
+            return None
+        a.event = self._event_arg(a.event) if a.event else self.cur
+        return a if a.event is not None else None
+
+    def _safely(self, fn) -> None:
+        try:
+            fn()
+        except (ValueError, SystemExit) as e:
+            self.c.print(Text(str(e), style="red"))
+        except Exception as e:  # API errors, missing keys: report, don't kill the session
+            self.c.print(Text(f"{type(e).__name__}: {e}", style="red"))
+
+    def do_why(self, arg: str) -> None:
+        """why [N] [--runs K] [--tool NAME] [--match REGEX] [--all]
+        Find which part of the context caused the decision at N (default: current), by removing pieces and
+        re-running that decision. Point at a tool call, a model reply, or a model call."""
+        a = self._exp_args(arg, "why")
+        if a:
+            self._safely(lambda: run_why(self.c, self.trace, a.event, runs=a.runs, tool=a.tool, match=a.match,
+                                         model_fn=self.model_fn, show_all=a.all, yes=False))
+
+    def do_rerun(self, arg: str) -> None:
+        """rerun [N] [--runs K] [--drop REF] [--replace OLD=>NEW] [--system-file F] [--model NAME]
+        Re-run the decision at N as recorded or with edits and show what the model does.
+        REF is an event number (9), or a part of one (9[1], 9[1].text)."""
+        a = self._exp_args(arg, "rerun")
+        if a:
+            self._safely(lambda: run_rerun(self.c, self.trace, a.event, runs=a.runs, drop=a.drop, replace=a.replace,
+                                           system_file=a.system_file, model_name=a.model, model_fn=self.model_fn))
+
+    def do_odds(self, arg: str) -> None:
+        """odds [N] [--runs K]   How often the model makes the same decision on the identical context."""
+        a = self._exp_args(arg, "odds")
+        if a:
+            self._safely(lambda: run_rerun(self.c, self.trace, a.event, runs=a.runs, model_fn=self.model_fn,
+                                           title=f"odds for decision at #{a.event}, identical context"))
+
     def do_quit(self, arg: str) -> bool:
         """quit   Exit."""
         return True
@@ -305,6 +438,7 @@ class Replay(cmd.Cmd):
     do_s = do_step
     do_b = do_back
     do_g = do_goto
+    do_jump = do_goto
     do_p = do_show
     do_ctx = do_context
     do_l = do_list
@@ -314,7 +448,7 @@ class Replay(cmd.Cmd):
 
     def get_names(self):
         # keep aliases out of the help listing
-        hidden = {"do_s", "do_b", "do_g", "do_p", "do_ctx", "do_l", "do_n", "do_q", "do_exit", "do_EOF"}
+        hidden = {"do_s", "do_b", "do_g", "do_jump", "do_p", "do_ctx", "do_l", "do_n", "do_q", "do_exit", "do_EOF"}
         return [n for n in super().get_names() if n not in hidden]
 
 
@@ -334,6 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("replay", help="step through a trace interactively (default)")
     s.add_argument("trace", nargs="?")
     s.add_argument("--at", default="0", help="event to start at")
+    s.add_argument("--model-fn", help="model function for why/rerun/odds inside the replay")
 
     s = sub.add_parser("ls", help="list recorded traces")
     s.add_argument("dir", nargs="?", default=DEFAULT_DIR)
@@ -358,6 +493,38 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("grep", help="find where a term appears and where it first entered")
     s.add_argument("trace")
     s.add_argument("term")
+
+    def experiment(s):
+        s.add_argument("--runs", type=int, default=5, help="reruns per variant (default 5)")
+        s.add_argument("--model-fn", help="use a Python function instead of the live API: module:function or file.py:function")
+        s.add_argument("--no-cache", action="store_true", help="don't reuse cached model replies")
+
+    s = sub.add_parser("why", help="find which part of the context caused a decision")
+    s.add_argument("trace")
+    s.add_argument("event", help="a tool call, model reply, or model call")
+    experiment(s)
+    s.add_argument("--tool", help="explain whether this tool gets called")
+    s.add_argument("--match", help="explain whether the reply matches this regex")
+    s.add_argument("--exact-args", action="store_true", help="count a rerun as the same only if tool arguments match too")
+    s.add_argument("--budget", type=int, default=300, help="max model calls (default 300)")
+    s.add_argument("--all", action="store_true", help="list every piece tested")
+    s.add_argument("--max-pieces", type=int, default=40, help="test at most this many pieces, most suspicious first")
+    s.add_argument("--json", dest="json_out", help="also write the report as JSON")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
+
+    s = sub.add_parser("rerun", help="re-run a decision as recorded or with edits")
+    s.add_argument("trace")
+    s.add_argument("event")
+    experiment(s)
+    s.add_argument("--drop", action="append", help="remove context from an event: 9, 9[1], 9[1].text, system")
+    s.add_argument("--replace", action="append", help="OLD=>NEW text replacement in the context")
+    s.add_argument("--system-file", help="replace the system prompt with this file")
+    s.add_argument("--model", dest="model_name", help="rerun on a different model")
+
+    s = sub.add_parser("odds", help="how often the model repeats a decision on the same context")
+    s.add_argument("trace")
+    s.add_argument("event")
+    experiment(s)
 
     s = sub.add_parser("diff", help="what changed between two events")
     s.add_argument("trace")
@@ -407,9 +574,23 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             c.print(render.show_grep(trace, args.term))
         elif cmd_name == "diff":
             c.print(render.show_diff(trace, resolve_event(trace, args.a), resolve_event(trace, args.b)))
+        elif cmd_name == "why":
+            return run_why(c, trace, resolve_event(trace, args.event), runs=args.runs, tool=args.tool,
+                           match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
+                           budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
+                           json_out=args.json_out, max_pieces=args.max_pieces)
+        elif cmd_name == "rerun":
+            return run_rerun(c, trace, resolve_event(trace, args.event), runs=args.runs, drop=args.drop,
+                             replace=args.replace, system_file=args.system_file, model_name=args.model_name,
+                             model_fn=args.model_fn, cache=not args.no_cache)
+        elif cmd_name == "odds":
+            ev = resolve_event(trace, args.event)
+            return run_rerun(c, trace, ev, runs=args.runs, model_fn=args.model_fn, cache=not args.no_cache,
+                             title=f"odds for decision at #{ev}, identical context")
         elif cmd_name == "replay":
             start = resolve_event(trace, args.at) if hasattr(args, "at") else 0
             r = Replay(trace, c, start=start)
+            r.model_fn = args.model_fn
             r.overview()
             if start != trace.events[0].id:
                 r.show_current()
@@ -417,6 +598,9 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
                 r.cmdloop()
             except KeyboardInterrupt:
                 c.print()
+    except ValueError as e:
+        c.print(Text(str(e), style="red"))
+        return 1
     except SystemExit as e:
         if isinstance(e.code, str):
             c.print(Text(e.code, style="red"))

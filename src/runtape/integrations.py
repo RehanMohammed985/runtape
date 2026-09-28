@@ -49,7 +49,7 @@ def _patch(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: ty
 
     def before(kwargs) -> tuple[int, float]:
         req = adapter.request(kwargs)
-        rid = rec.log_llm_request(provider=provider, **req)
+        rid = rec.log_llm_request(provider=provider, api=adapter.api, **req)
         return rid, time.perf_counter()
 
     def after(rid: int, t0: float, resp: Any) -> None:
@@ -213,6 +213,8 @@ def _params(kwargs: dict) -> dict:
 
 
 class _OpenAIChat:
+    api = "chat.completions"
+
     @staticmethod
     def request(kw: dict) -> dict:
         return {
@@ -297,6 +299,8 @@ class _OpenAIChatAcc:
 
 
 class _OpenAIResponses:
+    api = "responses"
+
     @staticmethod
     def request(kw: dict) -> dict:
         inp = kw.get("input")
@@ -369,6 +373,8 @@ class _OpenAIResponsesAcc:
 
 
 class _Anthropic:
+    api = "messages"
+
     @staticmethod
     def request(kw: dict) -> dict:
         return {

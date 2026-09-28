@@ -1,5 +1,7 @@
 import io
+import json
 import os
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -191,3 +193,62 @@ def test_replay_opens_on_overview(demo):
     assert "36 run_end" in out
     assert '"run_id"' not in out  # no raw metadata dump
     assert all(len(line) <= 80 for line in out.splitlines())  # rows never wrap
+
+
+SIM = str(Path(__file__).resolve().parents[1] / "examples" / "refund_bot.py") + ":simulated_model"
+
+
+def test_cli_why(demo):
+    code, out = run("why", str(demo), "31", "--model-fn", SIM, "--no-cache")
+    assert code == 0
+    assert 'Why does the agent call issue_refund(order_id="B-2290", amount=2400.0)?' in out
+    assert "happens 5/5" in out
+    assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
+    assert "masked" in out
+    assert 'instead: calls escalate_to_manager(order_id="B-2290") (5/5)' in out
+    assert "needed inputs" in out and "#28 lookup_order" in out
+
+
+def test_cli_why_json_and_cache(demo, tmp_path):
+    out_json = tmp_path / "why.json"
+    run("why", str(demo), "31", "--model-fn", SIM, "--json", str(out_json))
+    code, out = run("why", str(demo), "31", "--model-fn", SIM)  # second run: all cached
+    assert "0 model calls" in out
+    data = json.loads(out_json.read_text())
+    cause = data["causes"][0]
+    assert cause["kind"] == "decisive" and cause["masked"] is True
+    assert cause["chain"][-1]["removed"][0]["origin"] == 9
+    assert data["baseline"] == {"happens": 5, "runs": 5}
+
+
+def test_cli_rerun_and_odds(demo):
+    code, out = run("rerun", str(demo), "30", "--model-fn", SIM, "--drop", "9[1]")
+    assert "dropped #9 search_kb result[1]" in out
+    assert '5/5  calls escalate_to_manager(order_id="B-2290")' in out
+    code, out = run("rerun", str(demo), "30", "--model-fn", SIM, "--replace", "any amount=>up to $200")
+    assert "escalate_to_manager" in out
+    code, out = run("odds", str(demo), "30", "--model-fn", SIM)
+    assert "(same as recorded)" in out
+    code, out = run("rerun", str(demo), "30", "--model-fn", SIM, "--drop", "77")
+    assert code == 1 and "nothing in this context came from event #77" in out
+    code, out = run("why", str(demo), "0", "--model-fn", SIM)
+    assert code == 1 and "run_start" in out
+
+
+def test_replay_why(demo):
+    from runtape import Trace
+
+    buf = io.StringIO()
+    c = Console(file=buf, width=140, no_color=True, highlight=False)
+    r = cli.Replay(Trace.load(demo), c)
+    r.model_fn = SIM
+    r.use_rawinput = False
+    r.stdin = io.StringIO("goto 31\nwhy\nrerun --drop 9[1]\nodds 30 --runs 3\nwhy 0\njump 5\nq\n")
+    r.stdout = buf
+    r.cmdloop()
+    out = buf.getvalue()
+    assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
+    assert "dropped #9 search_kb result[1]" in out
+    assert "3/3  calls issue_refund" in out
+    assert "run_start" in out  # why 0 reports the error and keeps the session alive
+    assert "#5 tool_result" in out

@@ -8,6 +8,13 @@ The model here is scripted (a fake HTTP backend), so this runs offline with no
 API key and always reproduces the bug. The Anthropic SDK and runtape are real.
 
     python examples/refund_bot.py
+    runtape why last 31 --model-fn examples/refund_bot.py:simulated_model
+
+runtape why normally re-runs decisions against the real model the agent used.
+To keep this example offline, simulated_model below stands in for it: a small
+rule-based model that reads its context and decides from it the way the
+scripted replies did. Point runtape why at a real Anthropic key and it uses
+Claude instead.
 """
 import json
 import sys
@@ -26,10 +33,13 @@ import runtape  # noqa: E402
 # --------------------------------------------------------- scripted model
 
 
+_ids = iter(range(1, 1000))
+
+
 def _msg(text=None, tools=()):
     content = [{"type": "text", "text": text}] if text else []
-    for i, (name, args) in enumerate(tools):
-        content.append({"type": "tool_use", "id": f"toolu_{name}_{i}", "name": name, "input": args})
+    for name, args in tools:
+        content.append({"type": "tool_use", "id": f"toolu_{next(_ids):02d}", "name": name, "input": args})
     return {
         "id": "msg", "type": "message", "role": "assistant", "model": "claude-scripted",
         "content": content, "stop_reason": "tool_use" if tools else "end_turn",
@@ -64,6 +74,52 @@ def fake_backend():
         return hx.Response(200, json=queue.pop(0))
 
     return hx.Client(transport=hx.MockTransport(handler))
+
+
+def _context_text(req):
+    """Every string the model can see, in order."""
+    out = [req.get("system") or ""]
+
+    def walk(v):
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, dict):
+            for key in ("text", "content", "output"):
+                if key in v:
+                    walk(v[key])
+
+    walk(req.get("messages"))
+    return "\n".join(out)
+
+
+def simulated_model(req):
+    """Stand-in for Claude that decides from its context, for running `why` offline.
+
+    It follows whatever refund rule it can find in context: a rule allowing
+    refunds of any amount wins over the $200 limit, like the real bug.
+    """
+    msgs = req.get("messages") or []
+    last = msgs[-1] if msgs else {}
+    blocks = last.get("content") if isinstance(last.get("content"), list) else []
+    result = next((b.get("content") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"), None)
+    try:
+        order = json.loads(result) if result else None
+    except ValueError:
+        order = None
+    if not isinstance(order, dict) or "total" not in order:
+        return {"text": "Could you confirm your order number so I can look it up?"}
+    oid = next((o for o, v in ORDERS.items() if v["total"] == order["total"]), None)
+    ctx = _context_text(req).lower()
+    unlimited = "any amount" in ctx
+    limit_known = "over $200 require manager review" in ctx
+    if order["total"] <= 200 or unlimited or not limit_known:
+        return {"text": "Processing your refund.", "tool_calls": [
+            {"id": "sim", "name": "issue_refund", "arguments": {"order_id": oid, "amount": order["total"]}}]}
+    return {"text": "Refunds over $200 need a manager.", "tool_calls": [
+        {"id": "sim", "name": "escalate_to_manager", "arguments": {"order_id": oid}}]}
 
 
 # ------------------------------------------------------------------- agent
