@@ -105,10 +105,25 @@ def _parse_replace(items: list[str] | None) -> dict[str, str]:
 
 def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
             model_fn=None, budget=300, cache=True, yes=False, show_all=False, json_out=None,
-            max_pieces=40) -> int:
+            max_pieces=40, dry=False) -> int:
     from .rerun import build_request, request_for
     from .why import estimate_calls, why
 
+    if dry:
+        from .why import suspects
+
+        rows = suspects(trace, event)
+        c.print(Text(f"Suspects for the decision behind #{event}, ranked by shared wording (no model calls):", style="bold"))
+        if not rows:
+            c.print(Text("  Nothing in the context shares wording with this decision.", style="dim"))
+        for score, seg in rows:
+            row = Text(f"  {score:5.2f}  ", style="dim")
+            row.append(seg.where, style="bold")
+            row.append("  " + render.compact(seg.text, 80))
+            c.print(row)
+        likely, _ = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces)
+        c.print(Text(f"This is a guess. Run without --dry to test them (about {likely} model calls).", style="dim"))
+        return 0
     model = _model(model_fn)
     rid, _ = request_for(trace, event)
     likely, worst = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces)
@@ -520,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-pieces", type=int, default=40, help="test at most this many pieces, most suspicious first")
     s.add_argument("--json", dest="json_out", help="also write the report as JSON")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
+    s.add_argument("--dry", action="store_true", help="just rank suspects by shared wording, no model calls")
 
     s = sub.add_parser("rerun", help="re-run a decision as recorded or with edits")
     s.add_argument("trace")
@@ -587,7 +603,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_why(c, trace, resolve_event(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
-                           json_out=args.json_out, max_pieces=args.max_pieces)
+                           json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry)
         elif cmd_name == "rerun":
             return run_rerun(c, trace, resolve_event(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,

@@ -529,3 +529,28 @@ def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, 
     if is_deterministic(req):
         return 1 + n + 6, 1 + n * 2 + 30
     return runs + n * screen + 3 * runs * 3, runs + n * runs + 60 * runs
+
+
+def suspects(trace: Trace, event_id: int, top: int = 10) -> list[tuple[float, Segment]]:
+    """Pieces of context ranked by how much of the decision's wording they share. No model calls.
+
+    A fast first guess; `why` is what proves which of these actually matter.
+    """
+    tgt = make_target(trace, event_id, judge=lambda a, b: True)
+    req = build_request(trace, tgt.request_id)
+    decision = tgt.decision_text()
+    out: list[tuple[float, Segment]] = []
+    for seg in extract(req, trace, tgt.request_id):
+        best = (overlap(seg.text, decision), seg)
+        # descend to the most specific part that keeps most of the match
+        for _ in range(4):
+            kids = [(overlap(k.text, decision), k) for k in best[1].children()]
+            if not kids:
+                break
+            top_kid = max(kids, key=lambda x: x[0])
+            if top_kid[0] < 0.7 * best[0] or top_kid[0] == 0:
+                break
+            best = top_kid
+        out.append(best)
+    out.sort(key=lambda x: -x[0])
+    return [x for x in out[:top] if x[0] > 0]

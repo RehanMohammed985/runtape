@@ -128,6 +128,72 @@ class Reply:
         raise TypeError(f"model returned {type(obj).__name__}; expected Reply, dict or str")
 
 
+# ---------------------------------------------------------- format bridges
+
+# parameters each API accepts; LangChain traces carry many client-only settings besides these
+_ANTHROPIC_PARAMS = {"max_tokens", "temperature", "top_k", "top_p", "stop_sequences", "thinking", "tool_choice", "metadata"}
+_OPENAI_PARAMS = {
+    "temperature", "max_tokens", "max_completion_tokens", "top_p", "seed", "tool_choice", "response_format",
+    "presence_penalty", "frequency_penalty", "stop", "reasoning_effort", "parallel_tool_calls",
+}
+
+
+def _filter_params(params: dict, allowed: set, renames: dict | None = None) -> dict:
+    out = {}
+    for k, v in (params or {}).items():
+        k = (renames or {}).get(k, k)
+        if k in allowed and v is not None:
+            out[k] = v
+    return out
+
+
+def _text_of(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return "" if content is None else str(content)
+
+
+def openai_to_anthropic(messages: list) -> tuple[str | None, list]:
+    """Convert OpenAI-style messages (as LangChain records them) to Anthropic's format."""
+    system: list[str] = []
+    out: list[dict] = []
+    for m in messages or []:
+        role = m.get("role")
+        if role in ("system", "developer"):
+            system.append(_text_of(m.get("content")))
+        elif role == "tool":
+            block = {"type": "tool_result", "tool_use_id": m.get("tool_call_id"), "content": _text_of(m.get("content")) or "(empty)"}
+            prev = out[-1] if out else None
+            if prev and prev["role"] == "user" and isinstance(prev["content"], list) and all(
+                b.get("type") == "tool_result" for b in prev["content"]
+            ):
+                prev["content"].append(block)
+            else:
+                out.append({"role": "user", "content": [block]})
+        elif role == "assistant":
+            blocks = []
+            text = _text_of(m.get("content"))
+            if text.strip():
+                blocks.append({"type": "text", "text": text})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                try:
+                    args = json.loads(args) if isinstance(args, str) else (args or {})
+                except ValueError:
+                    args = {"_raw": args}
+                blocks.append({"type": "tool_use", "id": tc.get("id"), "name": fn.get("name"), "input": args})
+            out.append({"role": "assistant", "content": blocks or [{"type": "text", "text": "(empty)"}]})
+        else:
+            content = m.get("content")
+            if isinstance(content, list):
+                content = [b for b in content if isinstance(b, dict) and b.get("type") == "text"] or _text_of(content)
+            out.append({"role": "user", "content": content})
+    return ("\n\n".join(x for x in system if x) or None), out
+
+
 # ------------------------------------------------------------------- models
 
 Model = Callable[[dict], Reply]
@@ -154,13 +220,18 @@ class AnthropicModel:
     def __call__(self, req: dict) -> Reply:
         from .integrations import _Anthropic
 
-        kw = dict(req["params"])
+        messages, system = req["messages"], req.get("system")
+        if req.get("api") == "langchain":
+            system, messages = openai_to_anthropic(messages)
+            kw = _filter_params(req["params"], _ANTHROPIC_PARAMS, {"stop": "stop_sequences"})
+        else:
+            kw = dict(req["params"])
         kw.setdefault("max_tokens", 1024)
-        if req.get("system") is not None:
-            kw["system"] = req["system"]
+        if system is not None:
+            kw["system"] = system
         if req.get("tools"):
             kw["tools"] = req["tools"]
-        resp = self.client.messages.create(model=req["model"], messages=req["messages"], **kw)
+        resp = self.client.messages.create(model=req["model"], messages=messages, **kw)
         out = _Anthropic.response(resp)
         return Reply(out["text"], out["tool_calls"], out["stop_reason"], out["raw"])
 
@@ -186,7 +257,7 @@ class OpenAIChatModel:
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIChat
 
-        kw = dict(req["params"])
+        kw = _filter_params(req["params"], _OPENAI_PARAMS) if req.get("api") == "langchain" else dict(req["params"])
         if req.get("tools"):
             kw["tools"] = req["tools"]
         resp = self.client.chat.completions.create(model=req["model"], messages=req["messages"], **kw)
@@ -238,7 +309,7 @@ class FunctionModel:
 def model_for(req: dict) -> Model:
     """The live backend matching how a request was originally sent."""
     api, provider = req.get("api"), req.get("provider")
-    if api == "messages" or (provider == "anthropic" and api != "langchain"):
+    if api == "messages" or provider == "anthropic":
         return AnthropicModel()
     if api == "responses":
         return OpenAIResponsesModel()

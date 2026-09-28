@@ -406,3 +406,56 @@ def test_live_backend_selection(tmp_path):
     assert model_for({"api": "responses", "provider": "openai"}).__class__ is OpenAIResponsesModel
     with pytest.raises(ValueError):
         model_for({"api": "custom", "provider": "local"})
+
+
+def test_suspects_preview_has_no_model_calls(tmp_path):
+    from runtape.why import suspects
+
+    ex = load_example()
+    t = Trace.load(ex.main(tmp_path / "t.jsonl"))
+    rows = suspects(t, 31)
+    score, seg = rows[0]
+    assert seg.origin == 9 and seg.sub == "[1].text sentence 2"
+
+
+def test_langchain_anthropic_requests_resend_in_anthropic_format(tmp_path):
+    from runtape.rerun import AnthropicModel, model_for, openai_to_anthropic
+
+    rec = Recorder(tmp_path / "t.jsonl")
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"type": "function", "id": "t1", "function": {"name": "lookup", "arguments": '{"order_id": "1"}'}},
+            {"type": "function", "id": "t2", "function": {"name": "lookup", "arguments": '{"order_id": "2"}'}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "one"},
+        {"role": "tool", "tool_call_id": "t2", "content": "two"},
+    ]
+    rid = rec.log_llm_request(provider="anthropic", api="langchain", model="claude-x", messages=msgs,
+                              tools=[{"name": "lookup", "input_schema": {"type": "object"}}],
+                              params={"max_tokens": 100, "temperature": None, "streaming": False, "max_retries": 2,
+                                      "model_kwargs": {}, "stop": ["END"]})
+    rec.log_llm_response(rid, text="ok", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1)
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+    req = build_request(t, rid)
+    assert isinstance(model_for(req), AnthropicModel)
+
+    sent = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            sent.update(kw)
+            return {"content": [{"type": "text", "text": "fine"}], "stop_reason": "end_turn", "usage": {}}
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    reply = AnthropicModel(FakeClient())(req)
+    assert reply.text == "fine"
+    assert sent["system"] == "sys"
+    assert sent["stop_sequences"] == ["END"] and "streaming" not in sent and "max_retries" not in sent
+    assert sent["messages"][1]["content"][1] == {"type": "tool_use", "id": "t2", "name": "lookup", "input": {"order_id": "2"}}
+    assert [b["tool_use_id"] for b in sent["messages"][2]["content"]] == ["t1", "t2"]  # merged into one user turn
+    system, converted = openai_to_anthropic(msgs)
+    assert [m["role"] for m in converted] == ["user", "assistant", "user"]
