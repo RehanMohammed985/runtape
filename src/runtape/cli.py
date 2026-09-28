@@ -58,6 +58,15 @@ def resolve_trace(arg: str | None) -> Path:
 
 
 def resolve_event(trace: Trace, arg: str | int) -> int:
+    if isinstance(arg, str) and ":" in arg and arg.split(":", 1)[0] in ("tool", "error", "state"):
+        # tool:NAME -> the last call of that tool; error: -> last error; state:KEY -> last state change
+        kind, name = arg.split(":", 1)
+        etype = {"tool": "tool_call", "error": "error", "state": "state"}[kind]
+        hits = [e for e in trace.events if e.type == etype
+                and (not name or e.payload.get("name") == name or e.payload.get("key") == name)]
+        if not hits:
+            raise SystemExit(f"No {etype} {name!r} in this trace.")
+        return hits[-1].id
     try:
         n = int(arg)
     except (TypeError, ValueError):
@@ -600,6 +609,13 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
                 c.print()
     except ValueError as e:
         c.print(Text(str(e), style="red"))
+        return 1
+    except Exception as e:
+        msg = str(e)
+        if "api_key" in msg.lower() or "authentication" in msg.lower():
+            msg = ("No API key for the model this decision was made with. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
+                   "or pass --model-fn to use a local function.")
+        c.print(Text(f"{type(e).__name__}: {msg}", style="red"))
         return 1
     except SystemExit as e:
         if isinstance(e.code, str):

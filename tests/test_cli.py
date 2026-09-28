@@ -81,7 +81,7 @@ def test_grep_finds_entry_point(demo):
 def test_context(demo):
     code, out = run("context", str(demo), "30")
     assert "You are the support agent" in out
-    assert "community/faq-2019.md" in out  # poison still in the window at the decision
+    assert "community/forum/post-8812.md" in out  # poison still in the window at the decision
     assert "model reply #30" in out
     code, out = run("context", str(demo), "1")
     assert "Nothing in context yet" in out

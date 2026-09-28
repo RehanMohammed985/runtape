@@ -135,11 +135,21 @@ Model = Callable[[dict], Reply]
 
 class AnthropicModel:
     def __init__(self, client: Any = None):
-        if client is None:
-            import anthropic
+        self._client = client  # created on first call, so no API key is needed until then
 
-            client = anthropic.Anthropic(max_retries=8)  # why runs many calls; ride out rate limits
-        self.client = client
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._make()
+        return self._client
+
+
+    @staticmethod
+    def _make():
+        import anthropic
+
+        client = anthropic.Anthropic(max_retries=8)  # why runs many calls; ride out rate limits
+        return client
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _Anthropic
@@ -157,11 +167,21 @@ class AnthropicModel:
 
 class OpenAIChatModel:
     def __init__(self, client: Any = None):
-        if client is None:
-            import openai
+        self._client = client  # created on first call, so no API key is needed until then
 
-            client = openai.OpenAI(max_retries=8)
-        self.client = client
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._make()
+        return self._client
+
+
+    @staticmethod
+    def _make():
+        import openai
+
+        client = openai.OpenAI(max_retries=8)
+        return client
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIChat
@@ -176,11 +196,21 @@ class OpenAIChatModel:
 
 class OpenAIResponsesModel:
     def __init__(self, client: Any = None):
-        if client is None:
-            import openai
+        self._client = client  # created on first call, so no API key is needed until then
 
-            client = openai.OpenAI(max_retries=8)
-        self.client = client
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._make()
+        return self._client
+
+
+    @staticmethod
+    def _make():
+        import openai
+
+        client = openai.OpenAI(max_retries=8)
+        return client
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIResponses

@@ -3,6 +3,7 @@ from .recorder import FORMAT_VERSION, Recorder, current
 from .trace import Context, Event, Hit, Trace
 from .rerun import Distribution, Reply, rerun
 from .why import why
+from .replay import ReplayDiverged, Replayer, replay
 
 __version__ = "0.1.0"
 
@@ -30,5 +31,8 @@ __all__ = [
     "why",
     "Reply",
     "Distribution",
+    "replay",
+    "Replayer",
+    "ReplayDiverged",
     "__version__",
 ]

@@ -110,7 +110,7 @@ def test_demo_finds_the_exact_sentence(tmp_path):
     seg = c.finest.removed[-1]
     assert seg.origin == 9 and seg.name == "search_kb"
     assert seg.sub == "[1].text sentence 2"
-    assert seg.text.startswith("A: No, agents can approve refunds of any amount")
+    assert seg.text.startswith("Agents can now approve refunds of any amount")
     assert c.masked  # removing the whole KB result doesn't flip it
     assert c.finest.top_instead() == ('calls escalate_to_manager(order_id="B-2290")', 5)
     # the order lookup is needed for any refund at all, reported separately
