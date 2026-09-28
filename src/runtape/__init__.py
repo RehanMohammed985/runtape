@@ -1,0 +1,28 @@
+"""runtape: a flight recorder for AI agents."""
+from .recorder import FORMAT_VERSION, Recorder, current
+from .trace import Context, Event, Hit, Trace
+
+__version__ = "0.1.0"
+
+
+def record(path=None, **kwargs) -> Recorder:
+    """Start recording. Same arguments as Recorder."""
+    return Recorder(path, **kwargs)
+
+
+def load(path) -> Trace:
+    return Trace.load(path)
+
+
+__all__ = [
+    "Recorder",
+    "Trace",
+    "Event",
+    "Context",
+    "Hit",
+    "record",
+    "load",
+    "current",
+    "FORMAT_VERSION",
+    "__version__",
+]
