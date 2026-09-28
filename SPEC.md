@@ -25,11 +25,16 @@ Unknown fields must be preserved by tools and ignored by readers.
 payload: run_id, format ("runtape"), version (int, currently 1), name, started_at (ISO 8601), python, argv, tags (object).
 
 ### run_end
-payload: status ("ok" or "error"), duration_ms. Absent if the process crashed.
+payload: status ("ok", "error", or "diverged" for a replay that stopped at a difference), duration_ms.
+Absent if the process crashed.
+
+A replayed run (runtape.replay) has tags.replay_of set to the run_id it replayed.
 
 ### llm_request
 payload:
 - provider: "openai" | "anthropic" | other string
+- api: the endpoint, so the call can be resent: "messages" (Anthropic), "chat.completions" or
+  "responses" (OpenAI), "langchain" (OpenAI-style messages recorded through LangChain)
 - model
 - system: string or list, present only if it changed since the previous request
 - tools: list, present only if it changed since the previous request
@@ -67,6 +72,12 @@ Free-form: memory writes, plan updates, anything. payload: key, value.
 
 ### log
 Free-form note. payload: message, plus anything.
+
+## Reruns
+
+A request can be rebuilt exactly from its llm_request event: resolve messages, system and tools as
+above, and send params minus transport-only ones (stream, timeout, extra_headers). runtape why and
+runtape rerun do this; replies are cached under ./.runtape/cache keyed by a hash of the request.
 
 ## Values
 

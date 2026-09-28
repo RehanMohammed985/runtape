@@ -202,10 +202,10 @@ def test_cli_why(demo):
     code, out = run("why", str(demo), "31", "--model-fn", SIM, "--no-cache")
     assert code == 0
     assert 'Why does the agent call issue_refund(order_id="B-2290", amount=2400.0)?' in out
-    assert "happens 5/5" in out
+    assert "On the identical context it calls issue_refund in 5/5 reruns" in out
     assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
     assert "masked" in out
-    assert 'instead: calls escalate_to_manager(order_id="B-2290") (5/5)' in out
+    assert 'Without it the agent calls issue_refund in 0/5 reruns and instead calls escalate_to_manager(order_id="B-2290") (5/5)' in out
     assert "needed inputs" in out and "#28 lookup_order" in out
 
 

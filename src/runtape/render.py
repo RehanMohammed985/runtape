@@ -506,8 +506,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
     ))
     b = rep.baseline
     stable = "green" if rep.base >= 0.8 else "yellow" if rep.base >= 0.6 else "red"
-    line = Text("Rerun on the identical context: ")
-    line.append(f"happens {_ratio(b.kept, b.n)}", style=f"bold {stable}")
+    line = Text("On the identical context it ")
+    line.append(f"{tgt.describe()} in {_ratio(b.kept, b.n)} reruns", style=f"bold {stable}")
     if b.instead:
         alt, cnt = b.top_instead()
         line.append(f"   otherwise {alt} ({cnt})", style="dim")
@@ -527,11 +527,11 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             h.append("   masked", style="bold magenta")
         out.append(h)
         out.append(Text("  " + clip('"' + " ".join(seg.text.split()) + '"', 400)))
-        r = Text("  Without it: ")
-        r.append(f"{tgt.describe()} {_ratio(c.finest.kept, c.finest.n)}", style="bold")
+        r = Text("  Without it the agent ")
+        r.append(f"{tgt.describe()} in {_ratio(c.finest.kept, c.finest.n)} reruns", style="bold")
         if c.finest.top_instead():
             alt, cnt = c.finest.top_instead()
-            r.append("   instead: ")
+            r.append(" and instead ")
             r.append(f"{alt} ({cnt}/{c.finest.n})", style="bold green")
         out.append(r)
         if len(c.chain) > 1:
@@ -549,10 +549,10 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
         out.append(Text("CAUSE (combined)  no single piece explains it; together these do:", style="bold red"))
         for seg in j.removed:
             out.append(Text(f"  {seg.where}  " + compact(seg.text, 90)))
-        r = Text("  Without all of them: ")
-        r.append(f"{tgt.describe()} {_ratio(j.kept, j.n)}", style="bold")
+        r = Text("  Without all of them the agent ")
+        r.append(f"{tgt.describe()} in {_ratio(j.kept, j.n)} reruns", style="bold")
         if j.top_instead():
-            r.append(f"   instead: {j.top_instead()[0]}", style="green")
+            r.append(f" and instead {j.top_instead()[0]}", style="green")
         out.append(r)
 
     if prereq:
