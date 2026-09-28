@@ -178,3 +178,16 @@ def test_python_dash_m(demo):
     r = subprocess.run([sys.executable, "-m", "runtape", "--no-color", "summary"], capture_output=True, text=True,
                        env={**os.environ, "COLUMNS": "120"})
     assert r.returncode == 0 and "refund-bot" in r.stdout
+
+
+def test_replay_opens_on_overview(demo):
+    buf = io.StringIO()
+    c = Console(file=buf, width=80, no_color=True, highlight=False)
+    from runtape import Trace
+
+    cli.Replay(Trace.load(demo), c).overview()
+    out = buf.getvalue()
+    assert "refund-bot  ok  |  37 events, 9 model calls, 6 tool calls, 0 errors" in out
+    assert "36 run_end" in out
+    assert '"run_id"' not in out  # no raw metadata dump
+    assert all(len(line) <= 80 for line in out.splitlines())  # rows never wrap

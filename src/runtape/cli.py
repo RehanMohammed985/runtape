@@ -214,7 +214,29 @@ class Replay(cmd.Cmd):
         else:
             w = int(arg) if arg.isdigit() else 8
             evs = self.trace.events[max(0, self.pos - w) : self.pos + w + 1]
-        self.c.print(render.timeline(self.trace, evs, cursor=self.cur))
+        self.c.print(render.timeline(self.trace, evs, cursor=self.cur, width=self.row_width))
+
+    @property
+    def row_width(self) -> int:
+        return max(30, self.c.width - 34)
+
+    def overview(self) -> None:
+        """What you see when the replay opens: one-line summary and the whole run."""
+        self.c.print(render.summary_line(self.trace))
+        evs = self.trace.events
+        if len(evs) > 60:
+            self.c.print(render.timeline(self.trace, evs[:25], width=self.row_width))
+            self.c.print(Text(f"   ... {len(evs) - 50} more events (list all) ...", style="dim"))
+            self.c.print(render.timeline(self.trace, evs[-25:], width=self.row_width))
+        else:
+            self.c.print(render.timeline(self.trace, evs, width=self.row_width))
+        self.c.print(
+            Text(
+                "Type an event number to open it. Enter steps forward. "
+                "grep TERM searches, context shows what the model saw, help lists everything.",
+                style="dim",
+            )
+        )
 
     def do_grep(self, arg: str) -> None:
         """grep TERM   Find every event containing TERM. The first hit is where it entered the run.
@@ -273,7 +295,7 @@ class Replay(cmd.Cmd):
         if not errs:
             self.c.print(Text("No errors.", style="dim"))
         else:
-            self.c.print(render.timeline(self.trace, errs, cursor=self.cur))
+            self.c.print(render.timeline(self.trace, errs, cursor=self.cur, width=self.row_width))
 
     def do_quit(self, arg: str) -> bool:
         """quit   Exit."""
@@ -375,7 +397,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         if cmd_name == "summary":
             c.print(render.show_summary(trace))
         elif cmd_name == "timeline":
-            c.print(render.timeline(trace, trace.events))
+            c.print(render.timeline(trace, trace.events, width=max(30, c.width - 34)))
         elif cmd_name == "show":
             n = resolve_event(trace, args.event)
             c.print(render.show_event(trace, trace[n], raw=args.raw, full=args.full))
@@ -388,9 +410,9 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         elif cmd_name == "replay":
             start = resolve_event(trace, args.at) if hasattr(args, "at") else 0
             r = Replay(trace, c, start=start)
-            c.print(render.show_summary(trace))
-            c.print(Text("Enter = step.  back, goto N, context, grep TERM, diff, list, help, quit.", style="dim"))
-            r.show_current()
+            r.overview()
+            if start != trace.events[0].id:
+                r.show_current()
             try:
                 r.cmdloop()
             except KeyboardInterrupt:

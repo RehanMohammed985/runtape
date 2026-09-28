@@ -181,7 +181,7 @@ def oneline(e: Event, limit: int = 80) -> str:
 
 def timeline_row(trace: Trace, e: Event, cursor: int | None = None, width: int = 80) -> Text:
     mark = ">" if cursor == e.id else " "
-    row = Text(f"{mark}{e.id:>4} ", style="bold" if mark == ">" else "dim")
+    row = Text(f"{mark}{e.id:>4} ", style="bold" if mark == ">" else "dim", no_wrap=True, overflow="ellipsis")
     row.append(f"{e.type:<13}", style=TYPE_STYLE.get(e.type, ""))
     row.append(" " + oneline(e, width))
     lat = e.meta.get("latency_ms") if isinstance(e.meta, dict) else None
@@ -190,8 +190,24 @@ def timeline_row(trace: Trace, e: Event, cursor: int | None = None, width: int =
     return row
 
 
-def timeline(trace: Trace, events: Iterable[Event], cursor: int | None = None) -> RenderableType:
-    return Group(*[timeline_row(trace, e, cursor) for e in events])
+def timeline(trace: Trace, events: Iterable[Event], cursor: int | None = None, width: int = 80) -> RenderableType:
+    return Group(*[timeline_row(trace, e, cursor, width) for e in events])
+
+
+def summary_line(trace: Trace) -> Text:
+    """One-line run overview for the top of the replay."""
+    s = trace.summary()
+    style = {"ok": "green", "error": "bold red", "crashed": "bold red"}.get(s["status"], "")
+    t = Text(f"{s['name']}  ", style="bold")
+    t.append(s["status"], style=style)
+    ntools = sum(s["tool_calls"].values())
+    errs = s["errors"] + s["tool_errors"]
+    t.append(
+        f"  |  {s['events']} events, {s['llm_calls']} model calls, {ntools} tool calls, "
+        f"{errs} errors, {s['duration_s']}s",
+        style="dim",
+    )
+    return t
 
 
 # ------------------------------------------------------------ full views
@@ -266,6 +282,19 @@ def show_event(
         body.append(Text(f"{p.get('type')}: {p.get('message')}", style="bold red"))
         if p.get("traceback"):
             body.append(Text(clip(p["traceback"], limit), style="dim"))
+    elif t == "run_start":
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="dim")
+        grid.add_column()
+        grid.add_row("run", f"{p.get('name')} ({p.get('run_id')})")
+        grid.add_row("started", str(p.get("started_at")))
+        grid.add_row("command", " ".join(p.get("argv") or []))
+        grid.add_row("python", str(p.get("python")))
+        if p.get("tags"):
+            grid.add_row("tags", compact(p["tags"], 200))
+        body.append(grid)
+    elif t == "run_end":
+        body.append(Text(f"status: {p.get('status')}   duration: {p.get('duration_ms')} ms"))
     elif t == "state":
         body.append(Text(str(p.get("key")), style="bold magenta"))
         body.append(_text(clip(pretty(p.get("value")), limit), highlight=highlight))
