@@ -32,7 +32,7 @@ async def test_mcp_tools_end_to_end(tmp_path):
 
             async def call(name, **args):
                 res = await s.call_tool(name, args)
-                return "".join(getattr(c, "text", "") for c in res.content), res.isError
+                return "".join(getattr(c, "text", "") for c in res.content), getattr(res, "is_error", getattr(res, "isError", False))
 
             out, _ = await call("list_traces")
             assert "run.jsonl" in out

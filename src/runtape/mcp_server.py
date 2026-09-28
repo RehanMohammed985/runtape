@@ -8,6 +8,7 @@ why / rerun experiments, and answer with evidence instead of guesses.
 """
 from __future__ import annotations
 
+import functools
 import io
 import os
 from pathlib import Path
@@ -50,9 +51,32 @@ def _event(t: Trace, ref: str | int) -> int:
 
 
 def build_server(model_fn: str | None = None):
-    from mcp.server.fastmcp import FastMCP
+    try:  # mcp 2.x
+        from mcp.server.mcpserver import MCPServer as Server
+        from mcp.server.mcpserver.exceptions import ToolError
+    except ImportError:  # mcp 1.x
+        from mcp.server.fastmcp import FastMCP as Server
+        from mcp.server.fastmcp.exceptions import ToolError
 
-    mcp = FastMCP("runtape", instructions=INSTRUCTIONS)
+    server = Server("runtape", instructions=INSTRUCTIONS)
+
+    class _Tools:
+        """Registers tools, turning our errors into messages the calling agent can read."""
+
+        def tool(self):
+            def deco(fn):
+                @functools.wraps(fn)
+                def wrapped(*a, **kw):
+                    try:
+                        return fn(*a, **kw)
+                    except (ValueError, KeyError, FileNotFoundError) as e:
+                        raise ToolError(str(e).strip("'")) from None
+
+                return server.tool()(wrapped)
+
+            return deco
+
+    mcp = _Tools()
 
     def model():
         if not model_fn:
@@ -144,7 +168,7 @@ def build_server(model_fn: str | None = None):
         what = "; ".join(dist.notes) if dist.notes else "unchanged context"
         return _text(render.show_distribution(dist, dist.recorded, title=f"rerun ({what}), {len(dist)} runs"))
 
-    return mcp
+    return server
 
 
 def serve(model_fn: str | None = None) -> None:
