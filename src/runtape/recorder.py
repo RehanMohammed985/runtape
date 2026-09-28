@@ -251,6 +251,13 @@ class Recorder:
 
         return wrap_client(self, client)
 
+    def langchain(self):
+        """Callback handler for LangChain runnables and LangGraph graphs:
+        graph.invoke(inputs, config={"callbacks": [rec.langchain()]})"""
+        from .langchain import RuntapeCallbackHandler
+
+        return RuntapeCallbackHandler(self)
+
     def log_llm_request(
         self,
         *,

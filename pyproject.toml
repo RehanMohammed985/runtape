@@ -7,12 +7,28 @@ name = "runtape"
 version = "0.1.0"
 description = "A flight recorder for AI agents: record every step to a local trace, replay it like a debugger."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
-dependencies = []
+authors = [{ name = "Rehan Mohammed" }]
+keywords = ["agents", "llm", "debugging", "tracing", "observability", "openai", "anthropic", "langgraph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = ["rich>=13"]
+
+[project.scripts]
+runtape = "runtape.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "openai", "anthropic", "httpx"]
+langchain = ["langchain-core>=0.3"]
+dev = ["pytest", "pytest-asyncio", "openai", "anthropic", "httpx", "langchain-core", "langgraph", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/RehanMohammed985/runtape"
+Issues = "https://github.com/RehanMohammed985/runtape/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/runtape"]

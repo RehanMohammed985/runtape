@@ -56,6 +56,19 @@ class Hit:
     event: Event
     first: bool  # first event in the run where the term appears
     snippets: list[str]
+    paths: list[str] = field(default_factory=list)  # which fields matched, e.g. result[1].text
+
+
+def _leaves(obj: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """(path, string) for every scalar in a JSON value."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _leaves(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _leaves(v, f"{path}[{i}]")
+    elif obj is not None:
+        yield path, obj if isinstance(obj, str) else json.dumps(obj)
 
 
 class Trace:
@@ -182,25 +195,24 @@ class Trace:
 
     def grep(self, term: str, *, ignore_case: bool = True, width: int = 60) -> list[Hit]:
         """Every event containing `term`. The first hit is where it entered the run."""
+        # Searches string values, not the serialized line, so snippets read cleanly.
+        # A delta-encoded request only "contains" the term if it's in the new part,
+        # so the first hit really is where the term entered.
         needle = term.lower() if ignore_case else term
         hits: list[Hit] = []
         for e in self.events:
-            hay = e.text()
-            h = hay.lower() if ignore_case else hay
-            if needle not in h:
-                continue
-            # a delta-encoded request only "contains" the term if it's in the new part,
-            # so the first hit really is where the term entered
-            snippets = []
-            start = 0
-            while len(snippets) < 3:
-                i = h.find(needle, start)
+            snippets: list[str] = []
+            paths: list[str] = []
+            for path, val in _leaves(e.payload):
+                h = val.lower() if ignore_case else val
+                i = h.find(needle)
                 if i < 0:
-                    break
-                a, b = max(0, i - width), min(len(hay), i + len(term) + width)
-                snippets.append(("..." if a else "") + hay[a:b] + ("..." if b < len(hay) else ""))
-                start = i + len(needle)
-            hits.append(Hit(event=e, first=not hits, snippets=snippets))
+                    continue
+                a, b = max(0, i - width), min(len(val), i + len(term) + width)
+                snippets.append(("..." if a else "") + val[a:b] + ("..." if b < len(val) else ""))
+                paths.append(path)
+            if snippets:
+                hits.append(Hit(event=e, first=not hits, snippets=snippets[:3], paths=paths))
         return hits
 
     # ---------------------------------------------------------------- stats
