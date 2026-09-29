@@ -206,7 +206,7 @@ def test_cli_why(demo):
     assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
     assert "masked" in out
     assert 'Without it the agent calls issue_refund in 0/10 reruns and instead calls escalate_to_manager(order_id="B-2290") (10/10)' in out
-    assert "inputs: the call is made with data from these" in out and "#28 lookup_order" in out
+    assert "also required" in out and "#28 lookup_order" in out
     assert "significant after correcting for" in out
 
 

@@ -443,19 +443,23 @@ class Why:
             key=lambda x: (x[0], x[1]),
         )]
 
-    def _kind(self, cause: Cause) -> str:
-        """prerequisite when the piece supplies the values the call is made with and, without it,
-        the agent doesn't make another call instead; otherwise the piece drives the decision."""
-        if self.target.mode not in ("tool", "tools"):
-            return "decisive"
-        alt = cause.finest.top_instead()
-        if alt and alt[0].startswith("calls "):
-            return "decisive"
-        text = cause.top.removed[0].text.lower()
-        for v in _arg_values(self.target):
-            if re.search(r"(?<![\w.])" + re.escape(v) + r"(?![\w])", text):
-                return "prerequisite"
-        return "decisive"
+    def _alt_class(self, t: Trial) -> int:
+        """What the agent does without the removed content, ranked by how telling it is:
+        0 a different action, 1 it stops/answers/asks, 2 it redoes a step it already took."""
+        alt = t.top_instead()
+        if not alt or not alt[0].startswith("calls "):
+            return 1
+        names = re.findall(r"(?:calls |, )([A-Za-z_][\w.\-]*)\(", alt[0])
+        earlier = {e.payload.get("name") for e in self.trace.events
+                   if e.type == "tool_call" and e.id < self.target.request_id}
+        if names and all(n in earlier for n in names):
+            return 2
+        return 0
+
+    def _rank_key(self, c: Cause) -> tuple:
+        t = c.refined or c.finest
+        text = " ".join(s.text for s in t.removed)
+        return (self._alt_class(t), -overlap(text, self._decision), -t.effect(self.base))
 
     # -- search
 
@@ -520,9 +524,7 @@ class Why:
 
         for t in confirmed[: self.max_causes]:
             self.progress(f"narrowing down {t.removed[0].where}")
-            c = Cause(self._drill(t, []))
-            c.kind = self._kind(c)
-            rep.causes.append(c)
+            rep.causes.append(Cause(self._drill(t, [])))
 
         # A piece can hold the cause and evidence against it at once (a search result with a stale
         # doc next to the real policy). Removing the whole piece then changes nothing, so look inside
@@ -532,17 +534,18 @@ class Why:
             self.progress(f"looking inside {t.removed[0].where}")
             chain = self._drill(t, [])
             if len(chain) > 1:
-                c = Cause(chain, masked=True)
-                c.kind = self._kind(c)
-                rep.causes.append(c)
+                rep.causes.append(Cause(chain, masked=True))
 
         # A cause that couldn't be narrowed may be repeated elsewhere (a search run twice returns the
         # same bad doc twice): removing one copy then changes nothing. Look for the smallest set of
         # parts, in it and in the other suspicious pieces, that changes the decision together.
+        refined = 0
         for c in rep.causes:
             seg = c.top.removed[0]
-            if c.kind != "decisive" or len(c.chain) > 1 or not seg.children():
+            # causes that couldn't be narrowed, up to three (each search costs reruns)
+            if len(c.chain) > 1 or not seg.children() or refined >= 3:
                 continue
+            refined += 1
             cands = list(seg.children())
             for t in others[: self.expand]:
                 if t.removed[0] is not seg:
@@ -553,8 +556,8 @@ class Why:
                 if j is not None:
                     c.refined = j
 
-        rep.causes.sort(key=lambda c: (c.kind != "decisive", -c.finest.effect(self.base)))
-        if not any(c.kind == "decisive" for c in rep.causes) and self.joint_search:
+        rep.causes.sort(key=self._rank_key)
+        if not any(self._alt_class(c.refined or c.finest) == 0 for c in rep.causes) and self.joint_search:
             expanded = {id(t.removed[0]) for t in others[: self.expand]}
             # hold needed inputs fixed: the question is what makes the agent act differently
             needed = {id(c.top.removed[0]) for c in rep.causes}
@@ -569,6 +572,13 @@ class Why:
                 joint = self._joint(cands2)
                 if joint is not None:
                     rep.joint = Cause([joint])
+
+        # the leading cause, and any that make the agent act differently, get the full report; the rest
+        # (it stops without them, or redoes an earlier step) are listed as also required
+        allc = rep.causes + ([rep.joint] if rep.joint else [])
+        best = min(allc, key=self._rank_key) if allc else None
+        for c in allc:
+            c.kind = "decisive" if c is best or self._alt_class(c.refined or c.finest) == 0 else "prerequisite"
 
     def _drill(self, top: Trial, held: list[Segment]) -> list[Trial]:
         """Follow a cause down into smaller and smaller pieces while they still flip the decision."""

@@ -587,7 +587,7 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                 style="magenta",
             ))
 
-    if rep.joint is not None:
+    if rep.joint is not None and rep.joint.kind == "decisive":
         j = rep.joint.finest
         out.append(Rule(style="red"))
         out.append(Text("CAUSE (combined)  no single piece explains it; together these do:", style="bold red"))
@@ -601,7 +601,7 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
         out.append(_evidence(rep, j))
 
     if prereq:
-        out.append(Rule("inputs: the call is made with data from these", style="dim"))
+        out.append(Rule("also required: without these the agent stops, asks, or redoes an earlier step", style="dim"))
         for c in prereq:
             seg = c.finest.removed[-1]
             alt = c.finest.top_instead()
