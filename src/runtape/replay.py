@@ -23,7 +23,7 @@ import functools
 import inspect
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .recorder import Recorder, _bind, _safe_signature

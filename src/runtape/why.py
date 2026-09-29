@@ -56,6 +56,11 @@ class Target:
         if self.mode == "tools":
             return sorted(tc.get("name") for tc in r.tool_calls) == sorted(tc.get("name") for tc in self.recorded.tool_calls)
         if self.mode == "match":
+            if self._matched_call() is not None:
+                # the pattern picked out a tool call: only another such call counts, not the model
+                # mentioning the command in text (asking permission to run it is a different decision)
+                return any(self.pattern.search(f"{tc.get('name')} {_canon(tc.get('arguments'))}")
+                           for tc in r.tool_calls)
             return bool(self.pattern.search(_reply_text(r)))
         if self.mode == "judge":
             return bool(self.judge(self.recorded, r))
@@ -340,6 +345,9 @@ class Report:
                                     "p": c.recheck.p} if c.recheck else None} for c in self.causes],
             "fill": self.fill,
             "joint_cause": [trial(t) for t in self.joint.chain] if self.joint else None,
+            "joint_recheck": {"fill": self.joint.recheck.fill, "still_happens": self.joint.recheck.kept,
+                              "runs": self.joint.recheck.n, "p": self.joint.recheck.p}
+            if self.joint and self.joint.recheck else None,
             "tested": [trial(t) for t in self.trials],
             "warnings": self.warnings, "model_calls": self.calls, "cache_hits": self.cache_hits,
             "stopped": self.stopped, "deterministic": self.deterministic, "alpha": self.alpha,
@@ -647,8 +655,12 @@ class Why:
         best = min(eligible, key=self._rank_key) if eligible else None
         for c in allc:
             c.kind = "decisive" if (c is best or self._alt_class(c.refined or c.finest) == 0) else "prerequisite"
+        self._warn_budget = False
         for c in [c for c in allc if c.kind == "decisive"][:3]:
             self._recheck(c)
+        if self._warn_budget:
+            rep.warnings.append("The budget ran out before every cause was rechecked with a different replacement "
+                                "text. Raise --budget to finish; completed reruns are cached.")
 
     def _recheck(self, c: Cause) -> None:
         """Removing a whole message or tool result leaves replacement text in its place, and that text
@@ -659,7 +671,11 @@ class Why:
             return
         self.progress(f"rechecking {t.label} with a different replacement")
         r = Trial(list(t.removed), fill=self.alt_fill)
-        self._extend(r, self.confirm)
+        try:
+            self._extend(r, self.confirm)
+        except BudgetExceeded:
+            self._warn_budget = True
+            return
         r.p = fisher_less(r.kept, r.n, self.base_trial.kept, self.base_trial.n)
         r.family = 1
         c.recheck = r
@@ -827,8 +843,9 @@ def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, 
     if max_pieces:
         n = min(n, max_pieces)
     if is_deterministic(req):
-        return 2 + n + 12, 2 + n * 2 + 40
-    return max(runs, 10) + n * screen + 4 * 10 + 3 * runs * 3, 20 + n * runs + 60 * runs
+        return 2 + n + 12 + 2, 2 + n * 2 + 40 + 6
+    # baseline, screening, confirmations and narrowing, plus rechecking the headline with other replacement text
+    return max(runs, 10) + n * screen + 4 * 10 + 3 * runs * 3 + 10, 20 + n * runs + 60 * runs + 30
 
 
 def suspects(trace: Trace, event_id: int, top: int = 10) -> list[tuple[float, Segment]]:

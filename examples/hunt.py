@@ -45,9 +45,19 @@ def _refund(trace, provider, model, url):
         path = refund_bot.main(trace, local=model if provider == "ollama" else None, local_url=url,
                                openai_model=model if provider == "openai" else None)
     t = runtape.load(path)
-    bad = [e for e in t.of_type("tool_call") if e.payload.get("name") == "issue_refund"
-           and float((e.payload.get("arguments") or {}).get("amount") or 0) > 200]
+    bad = [e for e in t.of_type("tool_call") if e.payload.get("name") == "issue_refund" and _amount(e) > 200]
     return path, (bad[0].id if bad else None), ""
+
+
+def _amount(call) -> float:
+    """The refund amount of a recorded call; small models sometimes send "$2,400" or odd shapes."""
+    args = call.payload.get("arguments")
+    if not isinstance(args, dict):
+        return 0.0
+    try:
+        return float(str(args.get("amount") or 0).replace("$", "").replace(",", ""))
+    except ValueError:
+        return 0.0
 
 
 def _ops(trace, provider, model, url):
@@ -80,11 +90,22 @@ def main(argv=None):
     provider, model = _agent.provider_from_args(a)
     if provider == "simulated":
         ap.error("choose a model: --local, --openai or --anthropic")
+    if a.tries < 1:
+        ap.error("--tries must be at least 1")
     run = SCENARIOS[a.scenario]
     Path("traces").mkdir(exist_ok=True)
-    failures, total_in, total_out = [], 0, 0
+    failures, total_in, total_out, done = [], 0, 0, 0
     for i in range(1, a.tries + 1):
-        path, bad, extra = run(None, provider, model, a.local_url)
+        done = i
+        try:
+            path, bad, extra = run(None, provider, model, a.local_url)
+        except KeyboardInterrupt:
+            break
+        except SystemExit:
+            raise
+        except Exception as e:  # an API error on one run shouldn't lose the others
+            print(f"run {i}: error, {type(e).__name__}: {str(e)[:200]}")
+            continue
         tin, tout = tokens(path)
         total_in, total_out = total_in + tin, total_out + tout
         print(f"run {i}: {'FAILED at #' + str(bad) if bad else 'ok'}   {tin:,} input / {tout:,} output tokens   {path}")
@@ -92,7 +113,7 @@ def main(argv=None):
             failures.append((path, bad, extra))
             if not a.rate:
                 break
-    print(f"\n{len(failures)} of {i} runs failed. Tokens used: {total_in:,} input, {total_out:,} output.")
+    print(f"\n{len(failures)} of {done} runs failed. Tokens used: {total_in:,} input, {total_out:,} output.")
     if not failures:
         print("No failure to explain. Try more --tries, or another model.")
         return 1

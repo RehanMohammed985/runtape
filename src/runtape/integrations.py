@@ -9,7 +9,7 @@ import functools
 import inspect
 import json
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .serialize import to_jsonable
 

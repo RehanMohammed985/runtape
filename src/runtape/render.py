@@ -506,7 +506,10 @@ def _recheck(rep, c) -> Text | None:
     if r is None:
         return None
     t = c.refined or c.finest
-    holds = r.effect(rep.base) >= rep.threshold and (rep.deterministic or (r.p is not None and r.p <= rep.alpha))
+    if rep.deterministic:
+        holds = r.kept == 0  # the same bar the cause itself had to clear
+    else:
+        holds = r.effect(rep.base) >= rep.threshold and r.p is not None and r.p <= rep.alpha
     if holds:
         return Text(f'  Same result with the removed text replaced by "{r.fill}" instead of "{rep.fill}": '
                     f"{_ratio(r.kept, r.n)}.", style="dim")
