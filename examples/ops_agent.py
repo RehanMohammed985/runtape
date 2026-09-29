@@ -138,7 +138,14 @@ class Staging:
             return "8f3c2a1 Add discount codes to orders (#412)\n5d91e07 Bump fastapi to 0.115"
         if c.startswith("git status"):
             return "On branch main\nnothing to commit, working tree clean"
-        return f"{c.split()[0] if c else 'sh'}: ran with no output"
+        if re.search(r"systemctl\s+status|service\s+\S+\s+status|docker\s+ps", c):
+            return "orders-service.service - orders API\n   Active: active (running) since 06:02:55; 11h ago"
+        if re.search(r"journalctl|docker\s+logs", c):
+            return ("06:03:10 GET /health 200\n09:14:22 POST /orders 500 UndefinedColumn: column "
+                    "orders.discount_code does not exist")
+        if re.search(r"psql|pg_dump|select\s", c, re.I):
+            return "orders_staging: 1,214 accounts, 9,881 orders; alembic_version = 0041"
+        return f"{c.split()[0] if c else 'sh'}: command not available in this environment"
 
 
 # ------------------------------------------------------------ simulated model

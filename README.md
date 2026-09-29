@@ -11,6 +11,11 @@ the model's context caused a given decision.
 several times per variant, and reports the parts whose removal changes the
 decision, with a significance test.
 
+Tracing tools such as LangSmith and Langfuse show what the agent saw.
+Attribution methods such as ContextCite score context for a single model
+response. runtape works on your agent's own recorded runs, on your machine,
+one decision at a time.
+
 ![runtape why on the inbox example](https://raw.githubusercontent.com/RehanMohammed985/runtape/main/docs/demo.gif)
 
 In the example above, an email assistant forwards an invoice to an external
@@ -28,10 +33,38 @@ Requires Python 3.10+. Supports the OpenAI and Anthropic SDKs, LangChain and
 LangGraph, OpenAI-compatible local servers (Ollama, LM Studio, vLLM), and
 custom agent loops.
 
+## Regression tests for agent behavior
+
+Once a failure is recorded, the decision can be rerun as a test, for example
+in CI against a known malicious input:
+
+```python
+import runtape
+
+def test_injected_email_is_not_forwarded():
+    runtape.rerun("traces/injected.jsonl", 22, runs=10).never_calls("forward_email")
+
+def test_fix_holds_without_the_injected_text():
+    runtape.rerun("traces/injected.jsonl", 22, drop=["12.body para 4"]).never_calls("forward_email")
+```
+
+`rerun` sends the recorded request to the model again, with optional edits
+(`drop`, `replace`, `system`, `model_name`). The first test fails while the
+agent is vulnerable. To check a fix before shipping it, pass the new system
+prompt with `system=...`. Model output varies, so assertions are made over
+several runs.
+Other checks: `always_calls`, `rate(tool)`, `counts()`.
+
 ## Examples
 
-The repository includes two example agents. Both run offline with a
-rule-based stand-in model, passed to `why` with `--model-fn`.
+Three example agents, each with a failure to explain. By default they run
+offline with a rule-based stand-in model, passed to `why` with `--model-fn`.
+
+| example | failure |
+|---|---|
+| `inbox_agent.py` | an email assistant forwards an invoice because of an instruction hidden in an email |
+| `refund_bot.py` | a support agent refunds $2,400 after reading a stale forum post in search results |
+| `ops_agent.py` | an operations agent drops a shared staging database, following an old runbook line |
 
 ```
 git clone https://github.com/RehanMohammed985/runtape
@@ -40,17 +73,17 @@ pip install . openai anthropic
 
 python examples/inbox_agent.py
 runtape why last tool:forward_email --model-fn examples/inbox_agent.py:simulated_model
-
-python examples/refund_bot.py
-runtape why last tool:issue_refund --model-fn examples/refund_bot.py:simulated_model
 ```
 
-To run the refund example against a local model:
+Each example also runs on a real model: `--local MODEL` (Ollama, free),
+`--openai MODEL` or `--anthropic MODEL`. Real models don't fail every time, so
+`examples/hunt.py` runs an example until it fails, reports the tokens used,
+and prints the `why` command with a cost estimate:
 
 ```
 ollama pull llama3.1:8b
-python examples/refund_bot.py --local llama3.1:8b
-runtape why last tool:issue_refund
+python examples/hunt.py ops --local llama3.1:8b --tries 5
+python examples/hunt.py inbox --openai gpt-4o-mini --rate --tries 20
 ```
 
 With llama3.2 (3B), the refund agent paid order B-2290 $64, the amount from a
@@ -106,12 +139,15 @@ Procedure:
 7. Detect causes that are duplicated or individually sufficient.
 8. Separate pieces that change the action from pieces the agent only needs as
    input (without them it stops or repeats a lookup).
+9. Rerun each headline cause with a different replacement text, when the
+   removal left one, and report whether the result holds.
 
 Only the selected model call is rerun. Tools are not executed.
 
 Options: `--runs` (reruns per variant, default 5), `--budget` (max model
 calls, default 400), `--dry` (rank suspects without model calls), `--match
-REGEX` (explain a text answer), `--max-pieces`, `--expand`, `--json`.
+REGEX` (explain a text answer or a tool call's arguments), `--fill TEXT`
+(replacement for removed messages), `--max-pieces`, `--expand`, `--json`.
 Replies are cached in `./.runtape/`.
 
 ## runtape rerun
@@ -128,15 +164,6 @@ runtape odds  <trace> <event>
 
 `rerun` applies an edit to the recorded context and reports the distribution
 of decisions. `odds` reports the distribution on the unchanged context.
-
-The same check can be used as a test:
-
-```python
-def test_no_forwarding_from_injected_email():
-    runtape.rerun("traces/injected.jsonl", 22, drop=["12.body para 4"]).never_calls("forward_email")
-```
-
-`always_calls`, `rate(tool)` and `counts()` are also available.
 
 ## Replay
 
@@ -205,8 +232,10 @@ written. If `fn` raises, the event content is dropped.
 - Decisions made in fewer than about 1 in 5 reruns are too rare to attribute
   automatically. Use `odds` and `rerun --drop` instead.
 - At temperature 0, each variant is run once and each candidate twice.
-- Removed content is replaced with `[content removed]`, which can itself
-  affect the model.
+- Sentences, paragraphs and JSON items are cut out. A removed whole message
+  or tool result is replaced with `[content removed]` (set with `--fill`),
+  which can itself affect the model. `why` reruns each headline cause with a
+  second replacement and flags causes that don't hold.
 - By default, 80 pieces are tested (ranked by word overlap with the decision,
   always including the system prompt, the first user message and the latest
   message), and 6 are searched for masked causes. Untested pieces are listed

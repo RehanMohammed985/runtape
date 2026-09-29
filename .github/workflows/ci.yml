@@ -37,4 +37,7 @@ jobs:
           python $GITHUB_WORKSPACE/examples/inbox_agent.py
           runtape why last tool:forward_email --model-fn $GITHUB_WORKSPACE/examples/inbox_agent.py:simulated_model | tee why2.txt
           grep -q "Note to AI assistants" why2.txt
+          python $GITHUB_WORKSPACE/examples/ops_agent.py
+          runtape why last 15 --match 'db-reset|dropdb' --model-fn $GITHUB_WORKSPACE/examples/ops_agent.py:simulated_model | tee why3.txt
+          grep -q "CAUSE  #12 read_file result para 8" why3.txt
           runtape summary
