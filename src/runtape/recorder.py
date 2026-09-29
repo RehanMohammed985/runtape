@@ -299,6 +299,7 @@ class Recorder:
         tools: Any = None,
         params: dict | None = None,
         api: str | None = None,
+        endpoint: str | None = None,
     ) -> int:
         """Record a model call. Messages are delta-encoded against earlier requests.
 
@@ -309,6 +310,8 @@ class Recorder:
         payload: dict = {"provider": provider, "model": model}
         if api:
             payload["api"] = api
+        if endpoint:
+            payload["endpoint"] = endpoint  # a non-default server (e.g. a local model), so reruns go there too
 
         with self._lock:
             # system and tools are written only when they change, including a change to none,

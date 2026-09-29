@@ -60,9 +60,11 @@ def _patch(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: ty
     if getattr(original, _MARK, False):
         return
 
+    endpoint = _endpoint(resource)
+
     def before(kwargs) -> tuple[int, float]:
         req = adapter.request(kwargs)
-        rid = rec.log_llm_request(provider=provider, api=adapter.api, **req)
+        rid = rec.log_llm_request(provider=provider, api=adapter.api, endpoint=endpoint, **req)
         return rid, time.perf_counter()
 
     def after(rid: int, t0: float, resp: Any) -> None:
@@ -102,6 +104,15 @@ def _patch(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: ty
     setattr(resource, attr, wrapped)
 
 
+_DEFAULT_ENDPOINTS = ("https://api.openai.com/v1", "https://api.anthropic.com")
+
+
+def _endpoint(resource: Any) -> str | None:
+    """The server a client talks to, when it isn't the provider's default (Ollama, vLLM, a proxy...)."""
+    url = str(getattr(getattr(resource, "_client", None), "base_url", "") or "").rstrip("/")
+    return None if not url or url in _DEFAULT_ENDPOINTS else url
+
+
 def _patch_manager(rec: "Recorder", resource: Any, attr: str, provider: str, adapter: type, final: str) -> None:
     """Record SDK stream helpers used as context managers (anthropic messages.stream())."""
     original = getattr(resource, attr)
@@ -125,7 +136,8 @@ class _ManagerProxy:
 
     def _start(self):
         req = self._adapter.request(self._kwargs)
-        self._rid = self._rec.log_llm_request(provider=self._provider, api=self._adapter.api, **req)
+        self._rid = self._rec.log_llm_request(provider=self._provider, api=self._adapter.api,
+                                              endpoint=_endpoint(self._mgr) or None, **req)
         self._t0 = time.perf_counter()
 
     def _log(self, final_obj, exc):

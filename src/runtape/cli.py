@@ -144,7 +144,9 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
         req = build_request(trace, rid)
         resp = next((e for e in trace.children(rid) if e.type == "llm_response"), None)
         tin = ((resp.meta.get("tokens") or {}).get("input") if resp else None) or 0
-        tok = f", roughly {likely * tin / 1e6:.1f}M input tokens" if tin else ""
+        total = likely * tin
+        tok = (f", roughly {total / 1e6:.1f}M input tokens" if total >= 1e6 else
+               f", roughly {max(1, round(total / 1e3))}K input tokens" if total else "")
         c.print(Text(
             f"This reruns model call #{rid} ({req.get('model')}) about {likely} times "
             f"(at most {min(worst, budget)}){tok}. Results are cached, so repeats are free.",

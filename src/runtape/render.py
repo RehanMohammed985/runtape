@@ -538,6 +538,31 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
 
     for c in decisive:
         out.append(Rule(style="red"))
+        if c.refined is not None:
+            # the precise answer first: the same content appears more than once and only removing
+            # every copy changes the decision
+            j = c.refined
+            h = Text("CAUSE  ", style="bold red")
+            h.append(" + ".join(seg.where for seg in j.removed), style="bold")
+            out.append(h)
+            texts = []
+            for seg in j.removed:
+                t_ = " ".join(seg.text.split())
+                if t_ not in texts:
+                    texts.append(t_)
+            for t_ in texts:
+                out.append(Text("  " + clip('"' + t_ + '"', 300)))
+            out.append(Text(f"  The same content appears {len(j.removed)} times in the context, so removing any one "
+                            "copy changes nothing. Removing them all does:", style="magenta"))
+            r = Text("  Without them the agent ")
+            r.append(f"{tgt.describe()} in {_ratio(j.kept, j.n)} reruns", style="bold")
+            if j.top_instead():
+                alt, cnt = j.top_instead()
+                r.append(" and instead ")
+                r.append(f"{alt} ({cnt}/{j.n})", style="bold green")
+            out.append(r)
+            out.append(_evidence(rep, j))
+            continue
         seg = c.finest.removed[-1]
         h = Text("CAUSE  ", style="bold red")
         h.append(seg.where, style="bold")

@@ -14,6 +14,11 @@ API key and always reproduces the bug. The Anthropic SDK and runtape are real.
     python examples/refund_bot.py --live
     runtape why last tool:issue_refund
 
+    # free, with a local model through Ollama (https://ollama.com):
+    ollama pull qwen2.5:7b
+    python examples/refund_bot.py --local qwen2.5:7b
+    runtape why last tool:issue_refund
+
 runtape why normally re-runs decisions against the real model the agent used.
 To keep this example offline, simulated_model below stands in for it: a small
 rule-based model that reads its context and decides from it the way the
@@ -215,12 +220,59 @@ def run_agent(rec, client, system=SYSTEM, model="claude-scripted"):
     return messages
 
 
-def main(trace_path=None, live=False, model=LIVE_MODEL):
+OPENAI_TOOLS = [
+    {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+    for t in TOOLS
+]
+
+
+def run_agent_openai(rec, client, model, system=SYSTEM):
+    """The same agent for OpenAI-compatible servers (Ollama, vLLM, LM Studio, OpenAI itself)."""
+    tools = {
+        "lookup_order": rec.tool(name="lookup_order")(lambda order_id: ORDERS[order_id]),
+        "search_kb": rec.tool(name="search_kb")(lambda query: KB),
+        "issue_refund": rec.tool(name="issue_refund")(lambda order_id, amount: {"ok": True, "order_id": order_id, "amount": amount}),
+        "escalate_to_manager": rec.tool(name="escalate_to_manager")(lambda order_id: {"ok": True, "ticket": f"MGR-{order_id}"}),
+    }
+    tickets = [
+        "Hi, my mug from order A-1042 arrived cracked. Can I get a refund?",
+        "Where is my order A-1107?",
+        "I want to return my standing desk, order B-2290. Full refund please.",
+    ]
+    messages = [{"role": "system", "content": system}]
+    for ticket in tickets:
+        rec.state("ticket", ticket)
+        messages.append({"role": "user", "content": ticket})
+        for _ in range(8):
+            resp = client.chat.completions.create(model=model, messages=messages, tools=OPENAI_TOOLS)
+            msg = resp.choices[0].message
+            messages.append(msg.model_dump(exclude_none=True))
+            if not msg.tool_calls:
+                break
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments or "{}")
+                try:
+                    out = tools[tc.function.name](**args)
+                except Exception as e:  # small local models sometimes send bad arguments
+                    out = {"error": str(e)}
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out)})
+    return messages
+
+
+def main(trace_path=None, live=False, model=LIVE_MODEL, local=None, local_url="http://localhost:11434/v1"):
     """Run the agent. Scripted and offline by default; live=True uses real Claude
     (needs ANTHROPIC_API_KEY) so `runtape why` can be checked against a real model."""
     global _ids
     _ids = iter(range(1, 1000))
-    rec = runtape.record(trace_path, name="refund-bot-live" if live else "refund-bot", tags={"example": True, "live": live})
+    name = "refund-bot-local" if local else "refund-bot-live" if live else "refund-bot"
+    rec = runtape.record(trace_path, name=name, tags={"example": True, "live": live, "local": local})
+    if local:
+        import openai
+
+        client = rec.wrap(openai.OpenAI(base_url=local_url, api_key="local"))
+        with rec:
+            run_agent_openai(rec, client, local)
+        return rec.path
     if live:
         client = rec.wrap(anthropic.Anthropic())
     else:
@@ -237,8 +289,10 @@ if __name__ == "__main__":
     ap.add_argument("trace", nargs="?", help="where to write the trace (default: ./traces/)")
     ap.add_argument("--live", action="store_true", help="use real Claude instead of the scripted model")
     ap.add_argument("--model", default=LIVE_MODEL, help="Claude model for --live")
+    ap.add_argument("--local", metavar="MODEL", help="free: use a local model through Ollama, e.g. qwen2.5:7b")
+    ap.add_argument("--local-url", default="http://localhost:11434/v1", help="OpenAI-compatible server for --local")
     a = ap.parse_args()
-    path = main(a.trace, live=a.live, model=a.model)
+    path = main(a.trace, live=a.live, model=a.model, local=a.local, local_url=a.local_url)
     t = runtape.load(path)
     refunds = [e for e in t.of_type("tool_call") if e.payload["name"] == "issue_refund"]
     print(f"trace written to {path}")
@@ -246,7 +300,7 @@ if __name__ == "__main__":
         print(f"  #{e.id} issue_refund {e.payload['arguments']}")
     if any(e.payload["arguments"].get("amount", 0) > 200 for e in refunds):
         print("The agent refunded over $200 without a manager. Find out why:")
-        print("  runtape why last tool:issue_refund" + ("" if a.live else " --model-fn examples/refund_bot.py:simulated_model"))
-    elif a.live:
+        print("  runtape why last tool:issue_refund" + ("" if a.live or a.local else " --model-fn examples/refund_bot.py:simulated_model"))
+    elif a.live or a.local:
         print("This time the agent did not refund over $200. Model behavior varies; run it again,")
         print("or check how often it happens: runtape odds last <event>")

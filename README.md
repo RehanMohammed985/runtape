@@ -46,6 +46,23 @@ python examples/refund_bot.py --live
 runtape why last tool:issue_refund
 ```
 
+## Free, with a local model
+
+runtape is free and runs locally. Only **why**, **rerun** and **odds** call a
+model, and they call the same model your agent used. With
+[Ollama](https://ollama.com) that is a model on your own machine, at no cost:
+
+```
+ollama pull qwen2.5:7b
+python examples/refund_bot.py --local qwen2.5:7b
+runtape why last tool:issue_refund
+```
+
+Any OpenAI-compatible server works (Ollama, LM Studio, vLLM). runtape records
+the server's address with each call and sends reruns back to it. Small local
+models are less consistent than hosted ones, so a run may not reproduce the
+bug every time; run the agent again if it doesn't.
+
 ## Record your agent
 
 ```python

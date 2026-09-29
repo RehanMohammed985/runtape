@@ -240,6 +240,9 @@ class Cause:
     # decisive: it drives the decision (without it the agent acts differently)
     # prerequisite: it supplies the data the call is made with (without it the agent can't make this call)
     kind: str = "decisive"
+    # when no single part of the piece is enough (the same text also appears elsewhere, e.g. a search
+    # repeated later), the smallest set of parts, across pieces, whose removal together flips it
+    refined: "Trial | None" = None
 
     @property
     def finest(self) -> Trial:
@@ -296,7 +299,8 @@ class Report:
             "decision": {"request": self.target.request_id, "response": self.target.response_id,
                          "outcome": self.target.describe()},
             "baseline": {"happens": self.baseline.kept, "runs": self.baseline.n},
-            "causes": [{"kind": c.kind, "masked": c.masked, "chain": [trial(t) for t in c.chain]} for c in self.causes],
+            "causes": [{"kind": c.kind, "masked": c.masked, "chain": [trial(t) for t in c.chain],
+                        "together": trial(c.refined) if c.refined else None} for c in self.causes],
             "joint_cause": [trial(t) for t in self.joint.chain] if self.joint else None,
             "tested": [trial(t) for t in self.trials],
             "warnings": self.warnings, "model_calls": self.calls, "cache_hits": self.cache_hits,
@@ -527,6 +531,23 @@ class Why:
                 c = Cause(chain, masked=True)
                 c.kind = self._kind(c)
                 rep.causes.append(c)
+
+        # A cause that couldn't be narrowed may be repeated elsewhere (a search run twice returns the
+        # same bad doc twice): removing one copy then changes nothing. Look for the smallest set of
+        # parts, in it and in the other suspicious pieces, that changes the decision together.
+        for c in rep.causes:
+            seg = c.top.removed[0]
+            if c.kind != "decisive" or len(c.chain) > 1 or not seg.children():
+                continue
+            cands = list(seg.children())
+            for t in others[: self.expand]:
+                if t.removed[0] is not seg:
+                    cands.extend(t.removed[0].children())
+            if len(cands) > 1:
+                self.progress(f"narrowing down {seg.where} across repeated content")
+                j = self._joint(cands)
+                if j is not None:
+                    c.refined = j
 
         rep.causes.sort(key=lambda c: (c.kind != "decisive", -c.finest.effect(self.base)))
         if not any(c.kind == "decisive" for c in rep.causes) and self.joint_search:

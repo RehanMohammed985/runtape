@@ -42,6 +42,7 @@ def build_request(trace: Trace, request_id: int) -> dict:
     return {
         "provider": provider,
         "api": api,
+        "endpoint": p.get("endpoint"),
         "model": p.get("model"),
         "system": copy.deepcopy(ctx.system),
         "tools": copy.deepcopy(ctx.tools),
@@ -199,8 +200,9 @@ Model = Callable[[dict], Reply]
 
 
 class AnthropicModel:
-    def __init__(self, client: Any = None):
-        self._client = client  # created on first call, so no API key is needed until then
+    def __init__(self, client: Any = None, endpoint: str | None = None):
+        self._client = client
+        self.endpoint = endpoint  # created on first call, so no API key is needed until then
 
     @property
     def client(self):
@@ -209,12 +211,12 @@ class AnthropicModel:
         return self._client
 
 
-    @staticmethod
-    def _make():
+    def _make(self):
         import anthropic
 
-        client = anthropic.Anthropic(max_retries=8)  # why runs many calls; ride out rate limits
-        return client
+        if self.endpoint:
+            return anthropic.Anthropic(base_url=self.endpoint, max_retries=8)
+        return anthropic.Anthropic(max_retries=8)  # why runs many calls; ride out rate limits
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _Anthropic
@@ -236,8 +238,9 @@ class AnthropicModel:
 
 
 class OpenAIChatModel:
-    def __init__(self, client: Any = None):
-        self._client = client  # created on first call, so no API key is needed until then
+    def __init__(self, client: Any = None, endpoint: str | None = None):
+        self._client = client
+        self.endpoint = endpoint  # created on first call, so no API key is needed until then
 
     @property
     def client(self):
@@ -246,12 +249,15 @@ class OpenAIChatModel:
         return self._client
 
 
-    @staticmethod
-    def _make():
+    def _make(self):
+        import os
+
         import openai
 
-        client = openai.OpenAI(max_retries=8)
-        return client
+        if self.endpoint:  # a local or self-hosted server: it usually ignores the key
+            return openai.OpenAI(base_url=self.endpoint, max_retries=8,
+                                 api_key=os.environ.get("OPENAI_API_KEY") or "local")
+        return openai.OpenAI(max_retries=8)
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIChat
@@ -265,8 +271,9 @@ class OpenAIChatModel:
 
 
 class OpenAIResponsesModel:
-    def __init__(self, client: Any = None):
-        self._client = client  # created on first call, so no API key is needed until then
+    def __init__(self, client: Any = None, endpoint: str | None = None):
+        self._client = client
+        self.endpoint = endpoint  # created on first call, so no API key is needed until then
 
     @property
     def client(self):
@@ -275,12 +282,15 @@ class OpenAIResponsesModel:
         return self._client
 
 
-    @staticmethod
-    def _make():
+    def _make(self):
+        import os
+
         import openai
 
-        client = openai.OpenAI(max_retries=8)
-        return client
+        if self.endpoint:  # a local or self-hosted server: it usually ignores the key
+            return openai.OpenAI(base_url=self.endpoint, max_retries=8,
+                                 api_key=os.environ.get("OPENAI_API_KEY") or "local")
+        return openai.OpenAI(max_retries=8)
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIResponses
@@ -307,13 +317,13 @@ class FunctionModel:
 
 def model_for(req: dict) -> Model:
     """The live backend matching how a request was originally sent."""
-    api, provider = req.get("api"), req.get("provider")
+    api, provider, endpoint = req.get("api"), req.get("provider"), req.get("endpoint")
     if api == "messages" or provider == "anthropic":
-        return AnthropicModel()
+        return AnthropicModel(endpoint=endpoint)
     if api == "responses":
-        return OpenAIResponsesModel()
+        return OpenAIResponsesModel(endpoint=endpoint)
     if api == "chat.completions" or (api == "langchain" and provider == "openai"):
-        return OpenAIChatModel()
+        return OpenAIChatModel(endpoint=endpoint)
     raise ValueError(
         f"Don't know how to resend a {provider}/{api} call. Pass a model function "
         "(--model-fn module:function) that takes the request dict and returns a reply."
@@ -361,7 +371,7 @@ def model_identity(model: Any) -> str:
                 parts.append(repr(obj))
         src = "\n".join(parts)
         return "fn:" + name + ":" + hashlib.sha256(src.encode()).hexdigest()[:16]
-    return "api:" + type(model).__name__
+    return "api:" + type(model).__name__ + ":" + str(getattr(model, "endpoint", None) or "")
 
 
 def server_side_context(req: dict) -> str | None:
