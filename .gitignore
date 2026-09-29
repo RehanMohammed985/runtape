@@ -4,3 +4,7 @@ __pycache__/
 traces/
 dist/
 .runtape/
+
+bench/.cache/
+bench/traces/
+bench/results/sim.jsonl
