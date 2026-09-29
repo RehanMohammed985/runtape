@@ -126,7 +126,7 @@ def _parse_replace(items: list[str] | None) -> dict[str, str]:
 
 def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
             model_fn=None, budget=400, cache=True, yes=False, show_all=False, json_out=None,
-            max_pieces=80, dry=False, expand=6) -> int:
+            max_pieces=80, dry=False, expand=6, fill=None) -> int:
     from .rerun import build_request, request_for
     from .why import estimate_calls, why
 
@@ -177,7 +177,7 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
 
         rep = why(trace, event, model=model, runs=runs, tool=tool, match=match, exact_args=exact_args,
                   budget=budget, cache_dir=".runtape/cache" if cache else None, max_pieces=max_pieces, expand=expand,
-                  progress=progress, on_call=on_call)
+                  fill=fill, progress=progress, on_call=on_call)
     c.print(render.show_why(rep, show_all=show_all))
     if json_out:
         Path(json_out).write_text(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
@@ -186,14 +186,15 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
 
 
 def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replace=None, system=None,
-              system_file=None, model_name=None, model_fn=None, cache=True, title=None) -> int:
+              system_file=None, model_name=None, model_fn=None, cache=True, title=None, fill=None) -> int:
     from .rerun import rerun
 
     if system_file:
         system = Path(system_file).read_text()
     with c.status("rerunning"):
         dist = rerun(trace, event, runs=runs, drop=drop or [], replace=_parse_replace(replace), system=system,
-                     model_name=model_name, model=_model(model_fn), cache_dir=".runtape/cache" if cache else None)
+                     model_name=model_name, model=_model(model_fn), cache_dir=".runtape/cache" if cache else None,
+                     fill=fill)
     what = "; ".join(dist.notes) if dist.notes else "unchanged context"
     c.print(render.show_distribution(
         dist, dist.recorded,
@@ -439,6 +440,7 @@ class Replay(cmd.Cmd):
         p.add_argument("--replace", action="append")
         p.add_argument("--system-file")
         p.add_argument("--model")
+        p.add_argument("--fill")
         try:
             a = p.parse_args(shlex.split(arg))
         except (argparse.ArgumentError, SystemExit, ValueError) as e:
@@ -463,22 +465,23 @@ class Replay(cmd.Cmd):
             self.c.print(Text(friendly(e), style="red"))
 
     def do_why(self, arg: str) -> None:
-        """why [N] [--runs K] [--tool NAME] [--match REGEX] [--all]
+        """why [N] [--runs K] [--tool NAME] [--match REGEX] [--fill TEXT] [--all]
         Find which part of the context caused the decision at N (default: current), by removing pieces and
         re-running that decision. Point at a tool call, a model reply, or a model call."""
         a = self._exp_args(arg, "why")
         if a:
             self._safely(lambda: run_why(self.c, self.trace, a.event, runs=a.runs, tool=a.tool, match=a.match,
-                                         model_fn=self.model_fn, show_all=a.all, yes=False))
+                                         model_fn=self.model_fn, show_all=a.all, yes=False, fill=a.fill))
 
     def do_rerun(self, arg: str) -> None:
-        """rerun [N] [--runs K] [--drop REF] [--replace OLD=>NEW] [--system-file F] [--model NAME]
+        """rerun [N] [--runs K] [--drop REF] [--fill TEXT] [--replace OLD=>NEW] [--system-file F] [--model NAME]
         Re-run the decision at N as recorded or with edits and show what the model does.
         REF is an event number (9), or a part of one (9[1], 9[1].text)."""
         a = self._exp_args(arg, "rerun")
         if a:
             self._safely(lambda: run_rerun(self.c, self.trace, a.event, runs=a.runs, drop=a.drop, replace=a.replace,
-                                           system_file=a.system_file, model_name=a.model, model_fn=self.model_fn))
+                                           system_file=a.system_file, model_name=a.model, model_fn=self.model_fn,
+                                           fill=a.fill))
 
     def do_odds(self, arg: str) -> None:
         """odds [N] [--runs K]   How often the model makes the same decision on the identical context."""
@@ -576,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", dest="json_out", help="also write the report as JSON")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
     s.add_argument("--dry", action="store_true", help="just rank suspects by shared wording, no model calls")
+    s.add_argument("--fill", help='text that replaces a removed message or tool result: "marker" ([content removed], default), "empty" ((empty)), or any text')
 
     s = sub.add_parser("rerun", help="re-run a decision as recorded or with edits")
     s.add_argument("trace", help="trace file, part of its name, or 'last'")
@@ -585,6 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--replace", action="append", help="OLD=>NEW text replacement in the context")
     s.add_argument("--system-file", help="replace the system prompt with this file")
     s.add_argument("--model", dest="model_name", help="rerun on a different model")
+    s.add_argument("--fill", help='text that replaces a removed message or tool result: "marker" ([content removed], default), "empty" ((empty)), or any text')
 
     s = sub.add_parser("odds", help="how often the model repeats a decision on the same context")
     s.add_argument("trace", help="trace file, part of its name, or 'last'")
@@ -663,11 +668,12 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_why(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
-                           json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry, expand=args.expand)
+                           json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry, expand=args.expand,
+                           fill=args.fill)
         elif cmd_name == "rerun":
             return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
-                             model_fn=args.model_fn, cache=not args.no_cache)
+                             model_fn=args.model_fn, cache=not args.no_cache, fill=args.fill)
         elif cmd_name == "odds":
             ev = resolve_decision(trace, args.event)
             from .rerun import request_for as _rf

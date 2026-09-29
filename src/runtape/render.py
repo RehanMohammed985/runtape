@@ -501,6 +501,20 @@ def _evidence(rep, t) -> Text:
     )
 
 
+def _recheck(rep, c) -> Text | None:
+    r = getattr(c, "recheck", None)
+    if r is None:
+        return None
+    t = c.refined or c.finest
+    holds = r.effect(rep.base) >= rep.threshold and (rep.deterministic or (r.p is not None and r.p <= rep.alpha))
+    if holds:
+        return Text(f'  Same result with the removed text replaced by "{r.fill}" instead of "{rep.fill}": '
+                    f"{_ratio(r.kept, r.n)}.", style="dim")
+    return Text(f'  ! With "{r.fill}" in place of "{rep.fill}" the agent still {rep.target.describe()} in '
+                f"{_ratio(r.kept, r.n)} reruns (vs {_ratio(t.kept, t.n)}). The replacement text itself may be "
+                "steering the model. Try other replacement text with --fill.", style="yellow")
+
+
 def show_why(rep, *, show_all: bool = False) -> RenderableType:
     t = rep.trace
     tgt = rep.target
@@ -563,6 +577,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                 r.append(f"{alt} ({cnt}/{j.n})", style="bold green")
             out.append(r)
             out.append(_evidence(rep, j))
+            if _recheck(rep, c):
+                out.append(_recheck(rep, c))
             continue
         seg = c.finest.removed[-1]
         h = Text("CAUSE  ", style="bold red")
@@ -579,6 +595,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             r.append(f"{alt} ({cnt}/{c.finest.n})", style="bold green")
         out.append(r)
         out.append(_evidence(rep, c.finest))
+        if _recheck(rep, c):
+            out.append(_recheck(rep, c))
         if len(c.chain) > 1:
             out.append(Text("  Narrowed down: " + _path(c), style="dim"))
         if c.masked:
@@ -601,6 +619,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             r.append(f" and instead {j.top_instead()[0]}", style="green")
         out.append(r)
         out.append(_evidence(rep, j))
+        if _recheck(rep, rep.joint):
+            out.append(_recheck(rep, rep.joint))
 
     if rep.joint is not None and rep.joint.kind != "decisive":
         prereq = prereq + [rep.joint]

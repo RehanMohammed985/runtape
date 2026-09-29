@@ -28,7 +28,7 @@ from .rerun import (
     request_for,
 )
 from .recorder import _loose
-from .segments import Segment, ablate, extract, overlap
+from .segments import FILLS, Segment, ablate, extract, fill_text, overlap
 from .trace import Trace
 
 # ------------------------------------------------------------------ targets
@@ -70,8 +70,17 @@ class Target:
         if self.mode == "tools":
             return "calls " + " + ".join(sorted(tc.get("name") for tc in self.recorded.tool_calls))
         if self.mode == "match":
+            if self._matched_call() is not None:
+                return f"makes a call matching /{self.pattern.pattern}/"
             return f"produces output matching /{self.pattern.pattern}/"
         return "gives the same answer"
+
+    def _matched_call(self) -> dict | None:
+        """In match mode, the recorded tool call the pattern picks out, if it picks one."""
+        for tc in self.recorded.tool_calls:
+            if self.pattern.search(f"{tc.get('name')} {_canon(tc.get('arguments'))}"):
+                return tc
+        return None
 
     def question(self) -> str:
         """Base form, for 'Why does the agent ___?'."""
@@ -83,6 +92,9 @@ class Target:
         if self.mode == "tools":
             return "call " + " + ".join(sorted(tc.get("name") for tc in self.recorded.tool_calls))
         if self.mode == "match":
+            call = self._matched_call()
+            if call is not None:
+                return "call " + Reply(None, [call]).describe(110).removeprefix("calls ")
             return f"produce output matching /{self.pattern.pattern}/"
         return "answer: " + self.recorded.describe(90).removeprefix("replies: ")
 
@@ -231,6 +243,7 @@ class Trial:
     examples: dict = field(default_factory=dict, repr=False)  # one reply per alternative, by description
     p: float | None = None  # significance, once confirmed
     family: int = 0  # how many removals it was compared against (for the correction)
+    fill: str | None = None  # replacement text for removed whole pieces; None = the run's default
 
     @property
     def rate(self) -> float:
@@ -259,6 +272,8 @@ class Cause:
     # when no single part of the piece is enough (the same text also appears elsewhere, e.g. a search
     # repeated later), the smallest set of parts, across pieces, whose removal together flips it
     refined: "Trial | None" = None
+    # the same removal rerun with a different replacement text, to check the marker isn't the cause
+    recheck: "Trial | None" = None
 
     @property
     def finest(self) -> Trial:
@@ -288,6 +303,7 @@ class Report:
     deterministic: bool = False
     confirmed: list = field(default_factory=list)  # every trial that passed the significance test
     unexpanded: int = 0  # pieces with parts that were not looked inside for masked causes
+    fill: str = FILLS["marker"]
 
     @property
     def base(self) -> float:
@@ -319,7 +335,10 @@ class Report:
                          "outcome": self.target.describe()},
             "baseline": {"happens": self.baseline.kept, "runs": self.baseline.n},
             "causes": [{"kind": c.kind, "masked": c.masked, "chain": [trial(t) for t in c.chain],
-                        "together": trial(c.refined) if c.refined else None} for c in self.causes],
+                        "together": trial(c.refined) if c.refined else None,
+                        "recheck": {"fill": c.recheck.fill, "still_happens": c.recheck.kept, "runs": c.recheck.n,
+                                    "p": c.recheck.p} if c.recheck else None} for c in self.causes],
+            "fill": self.fill,
             "joint_cause": [trial(t) for t in self.joint.chain] if self.joint else None,
             "tested": [trial(t) for t in self.trials],
             "warnings": self.warnings, "model_calls": self.calls, "cache_hits": self.cache_hits,
@@ -358,6 +377,7 @@ class Why:
         expand: int = 6,
         max_pieces: int | None = 80,
         joint_search: bool = True,
+        fill: str | None = None,
         progress: Callable[[str], None] | None = None,
     ):
         if k < 1:
@@ -378,6 +398,9 @@ class Why:
         self.expand = expand
         self.max_pieces = max_pieces
         self.joint_search = joint_search
+        self.fill = fill_text(fill)
+        # the other preset, to recheck causes that relied on replacement text
+        self.alt_fill = FILLS["empty"] if self.fill == FILLS["marker"] else FILLS["marker"]
         self.progress = progress or (lambda msg: None)
         self._decision = target.decision_text()
         self.base_trial = Trial([])
@@ -400,13 +423,13 @@ class Why:
                 trial.instead[d] += 1
                 trial.examples.setdefault(d, r)
 
-    def _req(self, removed: list[Segment]) -> dict:
-        return ablate(self.req, removed) if removed else self.req
+    def _req(self, removed: list[Segment], fill: str | None = None) -> dict:
+        return ablate(self.req, removed, fill or self.fill) if removed else self.req
 
     def _extend(self, trial: Trial, n: int) -> None:
         if trial.n < n:
             try:
-                replies = self.sampler.many((self._req(trial.removed), i) for i in range(trial.n, n))
+                replies = self.sampler.many((self._req(trial.removed, trial.fill), i) for i in range(trial.n, n))
             except BudgetExceeded as e:
                 self._score(trial, getattr(e, "partial", []))  # keep what was measured before stopping
                 raise
@@ -495,7 +518,7 @@ class Why:
 
     def run(self) -> Report:
         rep = Report(self.trace, self.target, self.base_trial, k=self.k, threshold=self.threshold,
-                     alpha=self.alpha, deterministic=self.det)
+                     alpha=self.alpha, deterministic=self.det, fill=self.fill)
         try:
             self.progress("rerunning the recorded decision")
             self._extend(self.base_trial, self.k)
@@ -624,6 +647,22 @@ class Why:
         best = min(eligible, key=self._rank_key) if eligible else None
         for c in allc:
             c.kind = "decisive" if (c is best or self._alt_class(c.refined or c.finest) == 0) else "prerequisite"
+        for c in [c for c in allc if c.kind == "decisive"][:3]:
+            self._recheck(c)
+
+    def _recheck(self, c: Cause) -> None:
+        """Removing a whole message or tool result leaves replacement text in its place, and that text
+        can itself sway a model. Rerun the cause with a different replacement; if the request is the
+        same either way (the cause was cut out, not replaced), there is nothing to check."""
+        t = c.refined or c.finest
+        if self._req(t.removed) == self._req(t.removed, self.alt_fill):
+            return
+        self.progress(f"rechecking {t.label} with a different replacement")
+        r = Trial(list(t.removed), fill=self.alt_fill)
+        self._extend(r, self.confirm)
+        r.p = fisher_less(r.kept, r.n, self.base_trial.kept, self.base_trial.n)
+        r.family = 1
+        c.recheck = r
 
     def _drill(self, top: Trial, held: list[Segment]) -> list[Trial]:
         """Follow a cause down into smaller and smaller pieces while they still flip the decision."""
@@ -750,6 +789,7 @@ def why(
     alpha: float = 0.05,
     max_pieces: int | None = 80,
     expand: int = 6,
+    fill: str | None = None,
     progress: Callable[[str], None] | None = None,
     on_call: Callable[[], None] | None = None,
 ) -> Report:
@@ -774,7 +814,7 @@ def why(
         else:
             target.judge = llm_judge(sampler, req)
     rep = Why(trace, target, sampler, k=runs, screen=screen, confirm=confirm, threshold=threshold, alpha=alpha,
-              max_pieces=max_pieces, expand=expand, progress=progress).run()
+              max_pieces=max_pieces, expand=expand, fill=fill, progress=progress).run()
     rep.warnings[:0] = notes
     return rep
 

@@ -7,21 +7,26 @@ forward invoices to an outside address. The agent does it.
     python examples/inbox_agent.py                      # offline, simulated model
     runtape why last tool:forward_email --model-fn examples/inbox_agent.py:simulated_model
 
-    # free, with a local model through Ollama:
-    python examples/inbox_agent.py --local llama3.2
+    # with a real model (free through Ollama, or a hosted one):
+    python examples/inbox_agent.py --local llama3.1:8b
+    python examples/inbox_agent.py --openai gpt-4o-mini       # needs OPENAI_API_KEY
+    python examples/inbox_agent.py --anthropic claude-haiku-4-5  # needs ANTHROPIC_API_KEY
     runtape why last tool:forward_email
 
 The offline mode uses simulated_model below: a small rule-based stand-in that
 reads its context and, like many real models, follows instructions it finds
-in tool results. The OpenAI SDK and runtape are real in every mode.
+in tool results. The SDKs and runtape are real in every mode.
 """
 import json
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "src"))
+sys.path.insert(0, str(HERE))
 import runtape  # noqa: E402
+import _agent  # noqa: E402
 
 INBOX = {
     1: {"from": "dana@mugworks.com", "subject": "Q3 numbers",
@@ -61,22 +66,6 @@ TOOLS = [
 # ------------------------------------------------------------ simulated model
 
 
-def _tool_results(messages):
-    """[(tool name, parsed result)] in order, from OpenAI-format messages."""
-    names = {}
-    out = []
-    for m in messages:
-        for tc in m.get("tool_calls") or []:
-            names[tc.get("id")] = (tc.get("function") or {}).get("name")
-        if m.get("role") == "tool":
-            try:
-                val = json.loads(m.get("content") or "")
-            except ValueError:
-                val = m.get("content")
-            out.append((names.get(m.get("tool_call_id")), val))
-    return out
-
-
 def _call(name, **args):
     return {"tool_calls": [{"id": f"sim_{name}", "name": name, "arguments": args}]}
 
@@ -85,7 +74,7 @@ def simulated_model(req):
     """Stand-in for an LLM: works through the inbox, and follows instructions found in emails."""
     msgs = req.get("messages") or []
     text = json.dumps(msgs)
-    results = _tool_results(msgs)
+    results = _agent.tool_results(msgs)
     done = {name for name, _ in results}
     listed = next((r for n, r in results if n == "list_emails" and isinstance(r, list)), None)
     if listed is None:
@@ -108,35 +97,18 @@ def simulated_model(req):
     return {"text": "Dana wants Q3 numbers by Friday. Acme invoice #4471 ($1,240) filed. Dev Weekly newsletter."}
 
 
-def fake_backend():
-    """An OpenAI-compatible backend answered by simulated_model, for the offline mode."""
-    try:  # newer SDKs use httpx2
-        import httpx2 as httpx
-    except ImportError:
-        import httpx
-
-    def handler(request):
-        body = json.loads(request.content)
-        out = simulated_model({"messages": body["messages"]})
-        msg = {"role": "assistant", "content": out.get("text")}
-        if out.get("tool_calls"):
-            msg["tool_calls"] = [{"id": f"call_{len(body['messages'])}_{i}", "type": "function",
-                                  "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
-                                 for i, tc in enumerate(out["tool_calls"])]
-        return httpx.Response(200, json={
-            "id": "sim", "object": "chat.completion", "created": 0, "model": body["model"],
-            "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if out.get("tool_calls") else "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
-
-    return httpx.Client(transport=httpx.MockTransport(handler))
-
-
 # ---------------------------------------------------------------------- agent
 
 
-def run_agent(rec, client, model):
+def fake_backend():
+    """An OpenAI-compatible backend answered by simulated_model, for the offline mode."""
+    return _agent.simulated_backend(simulated_model)
+
+
+def run_agent(rec, client, model, provider="openai"):
+    """Run the assistant on the inbox. Returns the addresses it forwarded to."""
     forwarded = []
-    tools = {
+    impls = {
         "list_emails": rec.tool(name="list_emails")(
             lambda: [{"id": i, "from": e["from"], "subject": e["subject"]} for i, e in INBOX.items()]),
         "read_email": rec.tool(name="read_email")(lambda email_id: {"id": int(email_id), **INBOX[int(email_id)]}),
@@ -145,34 +117,18 @@ def run_agent(rec, client, model):
         "forward_email": rec.tool(name="forward_email")(
             lambda email_id, to: forwarded.append(to) or {"ok": True, "email_id": int(email_id), "to": to}),
     }
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": TASK}]
-    for _ in range(12):
-        resp = client.chat.completions.create(model=model, messages=messages, tools=TOOLS)
-        msg = resp.choices[0].message
-        messages.append(msg.model_dump(exclude_none=True))
-        if not msg.tool_calls:
-            break
-        for tc in msg.tool_calls:
-            try:
-                out = tools[tc.function.name](**json.loads(tc.function.arguments or "{}"))
-            except Exception as e:  # small local models sometimes send bad arguments
-                out = {"error": str(e)}
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out)})
+    _agent.run(client, provider, model, system=SYSTEM, task=TASK, tools=TOOLS, impls=impls)
     return forwarded
 
 
-def main(trace_path=None, local=None, local_url="http://localhost:11434/v1"):
-    import openai
-
-    rec = runtape.record(trace_path, name="inbox-agent-local" if local else "inbox-agent", tags={"example": True})
+def main(trace_path=None, provider="simulated", model="simulated", local_url="http://localhost:11434/v1", local=None):
     if local:
-        client = rec.wrap(openai.OpenAI(base_url=local_url, api_key="local"))
-        model = local
-    else:
-        client = rec.wrap(openai.OpenAI(api_key="simulated", http_client=fake_backend()))
-        model = "simulated"
+        provider, model = "ollama", local
+    rec = runtape.record(trace_path, name=f"inbox-agent-{provider}", tags={"example": True, "provider": provider})
+    backend = fake_backend() if provider == "simulated" else None
+    client = _agent.make_client(rec, provider, local_url=local_url, http_client=backend)
     with rec:
-        forwarded = run_agent(rec, client, model)
+        forwarded = run_agent(rec, client, model, "anthropic" if provider == "anthropic" else "openai")
     return rec.path, forwarded
 
 
@@ -181,14 +137,15 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("trace", nargs="?", help="where to write the trace (default: ./traces/)")
-    ap.add_argument("--local", metavar="MODEL", help="use a local model through Ollama, e.g. llama3.2")
-    ap.add_argument("--local-url", default="http://localhost:11434/v1")
+    _agent.add_provider_args(ap)
     a = ap.parse_args()
-    path, forwarded = main(a.trace, local=a.local, local_url=a.local_url)
+    provider, model = _agent.provider_from_args(a)
+    path, forwarded = main(a.trace, provider, model, a.local_url)
     print(f"trace written to {path}")
     if forwarded:
         print(f"The agent forwarded an invoice to {', '.join(forwarded)} without being asked. Find out why:")
-        print("  runtape why last tool:forward_email" + ("" if a.local else " --model-fn examples/inbox_agent.py:simulated_model"))
+        print("  runtape why last tool:forward_email"
+              + (" --model-fn examples/inbox_agent.py:simulated_model" if provider == "simulated" else ""))
     else:
-        print("The agent did not forward anything this time. Local models vary; run it again, or measure it:")
-        print("  runtape odds last <event of the last model reply> --runs 20")
+        print("The agent did not forward anything this time. Models vary from run to run; try again, "
+              "or use examples/hunt.py to run it several times.")

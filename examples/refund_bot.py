@@ -14,6 +14,10 @@ API key and always reproduces the bug. The Anthropic SDK and runtape are real.
     python examples/refund_bot.py --live
     runtape why last tool:issue_refund
 
+    # with an OpenAI model (needs OPENAI_API_KEY):
+    python examples/refund_bot.py --openai gpt-4o-mini
+    runtape why last tool:issue_refund
+
     # free, with a local model through Ollama (https://ollama.com):
     ollama pull qwen2.5:7b
     python examples/refund_bot.py --local qwen2.5:7b
@@ -258,19 +262,21 @@ def run_agent_openai(rec, client, model, system=SYSTEM):
     return messages
 
 
-def main(trace_path=None, live=False, model=LIVE_MODEL, local=None, local_url="http://localhost:11434/v1"):
+def main(trace_path=None, live=False, model=LIVE_MODEL, local=None, local_url="http://localhost:11434/v1",
+         openai_model=None):
     """Run the agent. Scripted and offline by default; live=True uses real Claude
     (needs ANTHROPIC_API_KEY) so `runtape why` can be checked against a real model."""
     global _ids
     _ids = iter(range(1, 1000))
-    name = "refund-bot-local" if local else "refund-bot-live" if live else "refund-bot"
+    name = ("refund-bot-local" if local else "refund-bot-openai" if openai_model else
+            "refund-bot-live" if live else "refund-bot")
     rec = runtape.record(trace_path, name=name, tags={"example": True, "live": live, "local": local})
-    if local:
+    if local or openai_model:
         import openai
 
-        client = rec.wrap(openai.OpenAI(base_url=local_url, api_key="local"))
+        client = rec.wrap(openai.OpenAI(base_url=local_url, api_key="local") if local else openai.OpenAI())
         with rec:
-            run_agent_openai(rec, client, local)
+            run_agent_openai(rec, client, local or openai_model)
         return rec.path
     import anthropic  # only the scripted and --live modes need the Anthropic SDK
 
@@ -292,12 +298,17 @@ if __name__ == "__main__":
     ap.add_argument("--model", default=LIVE_MODEL, help="Claude model for --live")
     ap.add_argument("--local", metavar="MODEL", help="free: use a local model through Ollama, e.g. qwen2.5:7b")
     ap.add_argument("--local-url", default="http://localhost:11434/v1", help="OpenAI-compatible server for --local")
+    ap.add_argument("--openai", metavar="MODEL", help="use an OpenAI model, e.g. gpt-4o-mini (needs OPENAI_API_KEY)")
+    ap.add_argument("--anthropic", metavar="MODEL", help="use a Claude model (needs ANTHROPIC_API_KEY); same as --live --model")
     a = ap.parse_args()
+    if a.anthropic:
+        a.live, a.model = True, a.anthropic
     try:
-        path = main(a.trace, live=a.live, model=a.model, local=a.local, local_url=a.local_url)
+        path = main(a.trace, live=a.live, model=a.model, local=a.local, local_url=a.local_url, openai_model=a.openai)
     except Exception as e:
         if "api_key" in str(e).lower() or "auth" in str(e).lower():
-            sys.exit("No Anthropic API key: set ANTHROPIC_API_KEY for --live, or use --local with Ollama.")
+            sys.exit("No API key: set ANTHROPIC_API_KEY (--live/--anthropic) or OPENAI_API_KEY (--openai), "
+                     "or use --local with Ollama.")
         raise
     t = runtape.load(path)
     refunds = [e for e in t.of_type("tool_call") if e.payload["name"] == "issue_refund"]
@@ -306,7 +317,8 @@ if __name__ == "__main__":
         print(f"  #{e.id} issue_refund {e.payload['arguments']}")
     if any(e.payload["arguments"].get("amount", 0) > 200 for e in refunds):
         print("The agent refunded over $200 without a manager. Find out why:")
-        print("  runtape why last tool:issue_refund" + ("" if a.live or a.local else " --model-fn examples/refund_bot.py:simulated_model"))
-    elif a.live or a.local:
+        print("  runtape why last tool:issue_refund"
+              + ("" if a.live or a.local or a.openai else " --model-fn examples/refund_bot.py:simulated_model"))
+    elif a.live or a.local or a.openai:
         print("This time the agent did not refund over $200. Model behavior varies; run it again,")
         print("or check how often it happens: runtape odds last <event>")

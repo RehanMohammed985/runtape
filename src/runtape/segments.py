@@ -16,6 +16,17 @@ from typing import Any
 from .trace import Trace
 
 REMOVED = "[content removed]"
+# replacements for removed whole messages and tool results; "marker" is the default
+FILLS = {"marker": REMOVED, "empty": "(empty)"}
+
+
+def fill_text(fill: str | None) -> str:
+    """A preset name (marker, empty) or any literal text."""
+    if not fill:
+        return REMOVED
+    return FILLS.get(fill, fill)
+
+
 _MIN_CHARS = 2
 
 
@@ -65,6 +76,9 @@ class Segment:
                 kids = self._json_children(node, self.jpath or ())
                 if kids:
                     return kids
+            if self.jpath is None and isinstance(node, str):
+                # a tool result that is a JSON-encoded string ("line one\nline two"): split the text inside
+                return self._json_children(node, ())
             if self.jpath is not None and isinstance(node, (list, dict)):
                 return []  # a single scalar-free JSON container; nothing smaller to try
         return self._text_children()
@@ -120,7 +134,7 @@ def _fmt_path(path: tuple) -> str:
 
 def _parse_json(s: str) -> Any:
     s = s.strip()
-    if not s or s[0] not in "[{":
+    if not s or s[0] not in '[{"':
         return None
     try:
         return json.loads(s)

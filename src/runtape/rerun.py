@@ -535,9 +535,10 @@ def edited_request(
     replace: dict[str, str] | None = None,
     system: str | None = None,
     model_name: str | None = None,
+    fill: str | None = None,
 ) -> tuple[dict, list[str]]:
     """The recorded request with edits applied. Returns (request, notes on what changed)."""
-    from .segments import ablate, extract, find, replace_text
+    from .segments import ablate, extract, fill_text, find, replace_text
 
     req = build_request(trace, request_id)
     notes = []
@@ -549,7 +550,7 @@ def edited_request(
             found = find(segs, ref)
             chosen.extend(found)
             notes.append(f"dropped {', '.join(s.where for s in found)}")
-        req = ablate(req, chosen)
+        req = ablate(req, chosen, fill_text(fill))
     for old, new in (replace or {}).items():
         if not old:
             raise ValueError("replace needs non-empty text to find")
@@ -583,6 +584,7 @@ def rerun(
     cache_dir: str | None = ".runtape/cache",
     budget: int | None = 100,
     workers: int = 8,
+    fill: str | None = None,
 ) -> Distribution:
     """Re-run one decision from a trace, as recorded or with edits, and return what the model did.
 
@@ -593,7 +595,8 @@ def rerun(
     if not isinstance(trace, Trace):
         trace = Trace.load(trace)
     rid, resp = request_for(trace, event_id)
-    req, notes = edited_request(trace, rid, drop=drop, replace=replace, system=system, model_name=model_name)
+    req, notes = edited_request(trace, rid, drop=drop, replace=replace, system=system, model_name=model_name,
+                                fill=fill)
     if model is None:
         model = model_for(req)
     elif not isinstance(model, (AnthropicModel, OpenAIChatModel, OpenAIResponsesModel, FunctionModel)):

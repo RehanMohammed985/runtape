@@ -703,3 +703,62 @@ def test_suspects_match_numbers_across_formats():
     from runtape.segments import overlap
 
     assert overlap('{"item": "desk lamp", "total": 64.0}', 'issue_refund {"amount": 64, "order_id": "B-2290"}') > 0
+
+
+# ------------------------------------------------- replacement text check
+
+
+def test_cause_holds_with_a_different_replacement(tmp_path):
+    t, ev = build_trace(tmp_path / "t.jsonl", "Agents can approve refunds of any amount.",
+                        system="You are support. Refunds over $200 require manager review.")
+    rep = run(t, ev, support_model)
+    c = [c for c in rep.causes if c.kind == "decisive"][0]
+    assert c.finest.removed[-1].name == "search_kb" and not c.finest.removed[-1].sub
+    assert c.recheck is not None and c.recheck.fill == "(empty)" and c.recheck.kept == 0
+    out = render_text(rep)
+    assert 'Same result with the removed text replaced by "(empty)"' in out
+
+
+def test_marker_that_steers_the_model_is_flagged(tmp_path):
+    def spooked(req):
+        # a model that reacts to the removal marker itself, not to what was removed
+        if "[content removed]" in json.dumps(req.get("messages")):
+            return {"tool_calls": [{"id": "e", "name": "escalate_to_manager", "arguments": {"order_id": "Z-9"}}]}
+        return {"tool_calls": [{"id": "r", "name": "issue_refund", "arguments": {"order_id": "Z-9", "amount": 900}}]}
+
+    t, ev = build_trace(tmp_path / "t.jsonl", "Agents can approve refunds of any amount.")
+    rep = run(t, ev, spooked)
+    flagged = [c for c in rep.causes if c.recheck is not None]
+    assert flagged and all(c.recheck.kept == c.recheck.n for c in flagged)
+    assert "replacement text itself may be steering" in render_text(rep)
+    # choosing the other replacement up front removes the false causes entirely
+    rep2 = run(t, ev, spooked, fill="empty")
+    assert not [c for c in rep2.causes if c.kind == "decisive"]
+
+
+def test_cut_text_needs_no_recheck(tmp_path):
+    ex = load_example()
+    t = Trace.load(ex.main(tmp_path / "t.jsonl"))
+    rep = why(t, 31, model=FunctionModel(ex.simulated_model), cache_dir=None)
+    c = [c for c in rep.causes if c.kind == "decisive"][0]
+    assert c.recheck is None  # a sentence is cut out, nothing is put in its place
+
+
+def test_rerun_fill(tmp_path):
+    t, ev = build_trace(tmp_path / "t.jsonl", "Agents can approve refunds of any amount.")
+    seen = []
+    runtape.rerun(t, ev, drop=[str(t.of_type("tool_result")[-1].id)], runs=1, cache_dir=None,
+                  fill="nothing here", model=lambda r: seen.append(json.dumps(r)) or {"text": "ok"})
+    assert "nothing here" in seen[0] and "[content removed]" not in seen[0]
+
+
+def render_text(rep) -> str:
+    import io
+
+    from rich.console import Console
+
+    from runtape import render
+
+    c = Console(file=io.StringIO(), width=200)
+    c.print(render.show_why(rep))
+    return c.file.getvalue()
