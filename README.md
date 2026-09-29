@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/RehanMohammed985/runtape/actions/workflows/ci.yml/badge.svg)](https://github.com/RehanMohammed985/runtape/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/runtape)](https://pypi.org/project/runtape/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/RehanMohammed985/runtape/blob/main/LICENSE)
 
 **Find the exact sentence that made your AI agent do it.**
 
@@ -12,7 +12,7 @@ that caused it and proves it. It removes pieces of what the model saw, reruns
 that one decision many times per variant, and shows what the agent does
 without it.
 
-![runtape why finding a prompt injection](docs/demo.gif)
+![runtape why finding a prompt injection](https://raw.githubusercontent.com/RehanMohammed985/runtape/main/docs/demo.gif)
 
 An email assistant was asked to summarize an inbox and file invoices. It
 forwarded an invoice to an outside address instead. **runtape why** traced it
@@ -135,7 +135,7 @@ Replies are cached in **./.runtape/** per model, so running it again is free.
 
 ## Test a fix before you ship it
 
-![runtape rerun](docs/rerun.svg)
+![runtape rerun](https://raw.githubusercontent.com/RehanMohammed985/runtape/main/docs/rerun.svg)
 
 ```
 runtape rerun <trace> <event> --drop "9[1]"             # remove part of the context
@@ -216,7 +216,7 @@ timelines and context windows, grep runs, and run **why** and **rerun** itself.
 ## Trace format
 
 One JSON object per line, append-only, with message history stored as deltas
-so long runs stay small. See [SPEC.md](SPEC.md).
+so long runs stay small. See [SPEC.md](https://github.com/RehanMohammed985/runtape/blob/main/SPEC.md).
 
 To keep secrets out of traces, pass **redact=fn** to **runtape.record**. It
 receives each event as a dict before it is written; if it fails, the event's

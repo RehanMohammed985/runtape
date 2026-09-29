@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "runtape"
-version = "0.2.0"
-description = "A flight recorder for AI agents: record every step to a local trace, replay it like a debugger."
+version = "0.3.0"
+description = "Find the exact sentence that made your AI agent do it: record agent runs locally, then prove what caused a decision."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Rehan Mohammed" }]
-keywords = ["agents", "llm", "debugging", "tracing", "observability", "openai", "anthropic", "langgraph"]
+keywords = ["agents", "llm", "debugging", "tracing", "observability", "prompt-injection", "attribution", "openai", "anthropic", "langgraph", "ollama", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
