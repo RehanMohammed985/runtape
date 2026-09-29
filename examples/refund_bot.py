@@ -293,7 +293,12 @@ if __name__ == "__main__":
     ap.add_argument("--local", metavar="MODEL", help="free: use a local model through Ollama, e.g. qwen2.5:7b")
     ap.add_argument("--local-url", default="http://localhost:11434/v1", help="OpenAI-compatible server for --local")
     a = ap.parse_args()
-    path = main(a.trace, live=a.live, model=a.model, local=a.local, local_url=a.local_url)
+    try:
+        path = main(a.trace, live=a.live, model=a.model, local=a.local, local_url=a.local_url)
+    except Exception as e:
+        if "api_key" in str(e).lower() or "auth" in str(e).lower():
+            sys.exit("No Anthropic API key: set ANTHROPIC_API_KEY for --live, or use --local with Ollama.")
+        raise
     t = runtape.load(path)
     refunds = [e for e in t.of_type("tool_call") if e.payload["name"] == "issue_refund"]
     print(f"trace written to {path}")

@@ -266,6 +266,18 @@ def test_bad_negative_and_last_references(demo):
     code, out = run("show", str(demo), "-999")
     assert code == 1 and "No event #-999" in out
     code, out = run("why", str(demo), "last", "--model-fn", SIM, "--dry")
-    assert code == 0 and "Suspects for the decision behind #35" in out  # last model reply, not run_end
+    assert code == 0 and "Suspects for the decision at #35" in out  # last model reply, not run_end
     r_out = replay(demo, "goto -999\nshow\nq\n")
     assert "No event #-999" in r_out and "#0 run_start" in r_out  # session survives
+
+
+def test_trace_path_alone_opens_replay(demo, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    code, out = run(str(demo))
+    assert code == 0 and "refund-bot  ok" in out
+
+
+def test_trace_path_after_global_option(demo, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    code, out = run("--no-color", str(demo))
+    assert code == 0 and "refund-bot  ok" in out

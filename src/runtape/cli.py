@@ -28,6 +28,15 @@ TYPE_ALIASES = {
 }
 
 
+def friendly(e: BaseException) -> str:
+    msg = str(e)
+    low = msg.lower()
+    if "api_key" in low or "authentication" in low or "auth_token" in low:
+        msg = ("No API key for the model this decision was made with. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
+               "or pass --model-fn to use a local function.")
+    return f"{type(e).__name__}: {msg}"
+
+
 # ------------------------------------------------------------ resolution
 
 
@@ -116,8 +125,8 @@ def _parse_replace(items: list[str] | None) -> dict[str, str]:
 
 
 def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
-            model_fn=None, budget=300, cache=True, yes=False, show_all=False, json_out=None,
-            max_pieces=40, dry=False) -> int:
+            model_fn=None, budget=400, cache=True, yes=False, show_all=False, json_out=None,
+            max_pieces=80, dry=False, expand=6) -> int:
     from .rerun import build_request, request_for
     from .why import estimate_calls, why
 
@@ -125,7 +134,10 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
         from .why import suspects
 
         rows = suspects(trace, event)
-        c.print(Text(f"Suspects for the decision behind #{event}, ranked by shared wording (no model calls):", style="bold"))
+        from .rerun import request_for as _rf
+
+        c.print(Text(f"Suspects for the decision at #{_rf(trace, event)[1]}, ranked by shared wording (no model calls):",
+                     style="bold"))
         if not rows:
             c.print(Text("  Nothing in the context shares wording with this decision.", style="dim"))
         for score, seg in rows:
@@ -164,7 +176,7 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
             counter["n"] += 1
 
         rep = why(trace, event, model=model, runs=runs, tool=tool, match=match, exact_args=exact_args,
-                  budget=budget, cache_dir=".runtape/cache" if cache else None, max_pieces=max_pieces,
+                  budget=budget, cache_dir=".runtape/cache" if cache else None, max_pieces=max_pieces, expand=expand,
                   progress=progress, on_call=on_call)
     c.print(render.show_why(rep, show_all=show_all))
     if json_out:
@@ -448,7 +460,7 @@ class Replay(cmd.Cmd):
         except (ValueError, SystemExit) as e:
             self.c.print(Text(str(e), style="red"))
         except Exception as e:  # API errors, missing keys: report, don't kill the session
-            self.c.print(Text(f"{type(e).__name__}: {e}", style="red"))
+            self.c.print(Text(friendly(e), style="red"))
 
     def do_why(self, arg: str) -> None:
         """why [N] [--runs K] [--tool NAME] [--match REGEX] [--all]
@@ -472,8 +484,10 @@ class Replay(cmd.Cmd):
         """odds [N] [--runs K]   How often the model makes the same decision on the identical context."""
         a = self._exp_args(arg, "odds")
         if a:
+            from .rerun import request_for as _rf
+
             self._safely(lambda: run_rerun(self.c, self.trace, a.event, runs=a.runs, model_fn=self.model_fn,
-                                           title=f"odds for decision at #{a.event}, identical context"))
+                                           title=f"odds for the decision at #{_rf(self.trace, a.event)[1]}, identical context"))
 
     def do_quit(self, arg: str) -> bool:
         """quit   Exit."""
@@ -547,23 +561,25 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--model-fn", help="use a Python function instead of the live API: module:function or file.py:function")
         s.add_argument("--no-cache", action="store_true", help="don't reuse cached model replies")
 
+    ref_help = ("event number, 'last' (the last model decision), or tool:NAME (the last call of a tool)")
     s = sub.add_parser("why", help="find which part of the context caused a decision")
-    s.add_argument("trace")
-    s.add_argument("event", help="a tool call, model reply, or model call")
+    s.add_argument("trace", help="trace file, part of its name, or 'last' for the newest in ./traces")
+    s.add_argument("event", help="the decision to explain: " + ref_help)
     experiment(s)
     s.add_argument("--tool", help="explain whether this tool gets called")
     s.add_argument("--match", help="explain whether the reply matches this regex")
     s.add_argument("--exact-args", action="store_true", help="count a rerun as the same only if tool arguments match too")
-    s.add_argument("--budget", type=int, default=300, help="max model calls (default 300)")
+    s.add_argument("--budget", type=int, default=400, help="max model calls (default 400)")
     s.add_argument("--all", action="store_true", help="list every piece tested")
-    s.add_argument("--max-pieces", type=int, default=40, help="test at most this many pieces, most suspicious first")
+    s.add_argument("--max-pieces", type=int, default=80, help="test at most this many pieces, most suspicious first (default 80)")
+    s.add_argument("--expand", type=int, default=6, help="look inside this many pieces for masked causes (default 6)")
     s.add_argument("--json", dest="json_out", help="also write the report as JSON")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
     s.add_argument("--dry", action="store_true", help="just rank suspects by shared wording, no model calls")
 
     s = sub.add_parser("rerun", help="re-run a decision as recorded or with edits")
-    s.add_argument("trace")
-    s.add_argument("event")
+    s.add_argument("trace", help="trace file, part of its name, or 'last'")
+    s.add_argument("event", help=ref_help)
     experiment(s)
     s.add_argument("--drop", action="append", help="remove context from an event: 9, 9[1], 9[1].text, system")
     s.add_argument("--replace", action="append", help="OLD=>NEW text replacement in the context")
@@ -571,8 +587,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", dest="model_name", help="rerun on a different model")
 
     s = sub.add_parser("odds", help="how often the model repeats a decision on the same context")
-    s.add_argument("trace")
-    s.add_argument("event")
+    s.add_argument("trace", help="trace file, part of its name, or 'last'")
+    s.add_argument("event", help=ref_help)
     experiment(s)
 
     s = sub.add_parser("diff", help="what changed between two events")
@@ -582,7 +598,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_COMMANDS = {"replay", "ls", "summary", "timeline", "show", "context", "grep", "diff", "why", "rerun", "odds", "mcp"}
+
+
 def main(argv: list[str] | None = None, console: Console | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    i = 0
+    while i < len(argv) and argv[i] in ("--no-color",):
+        i += 1  # global options come first
+    if i < len(argv) and not argv[i].startswith("-") and argv[i] not in _COMMANDS and (
+        argv[i].endswith(".jsonl") or Path(argv[i]).is_file()
+    ):
+        argv.insert(i, "replay")  # `runtape trace.jsonl` opens it
     args = build_parser().parse_args(argv)
     c = console or Console(no_color=args.no_color, highlight=False)
     cmd_name = args.cmd or "replay"
@@ -636,15 +663,17 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_why(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
-                           json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry)
+                           json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry, expand=args.expand)
         elif cmd_name == "rerun":
             return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
                              model_fn=args.model_fn, cache=not args.no_cache)
         elif cmd_name == "odds":
             ev = resolve_decision(trace, args.event)
+            from .rerun import request_for as _rf
+
             return run_rerun(c, trace, ev, runs=args.runs, model_fn=args.model_fn, cache=not args.no_cache,
-                             title=f"odds for decision at #{ev}, identical context")
+                             title=f"odds for the decision at #{_rf(trace, ev)[1]}, identical context")
         elif cmd_name == "replay":
             start = resolve_event(trace, getattr(args, "at", "0"))
             r = Replay(trace, c, start=start)
@@ -660,11 +689,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         c.print(Text(str(e), style="red"))
         return 1
     except Exception as e:
-        msg = str(e)
-        if "api_key" in msg.lower() or "authentication" in msg.lower():
-            msg = ("No API key for the model this decision was made with. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
-                   "or pass --model-fn to use a local function.")
-        c.print(Text(f"{type(e).__name__}: {msg}", style="red"))
+        c.print(Text(friendly(e), style="red"))
         return 1
     except SystemExit as e:
         if isinstance(e.code, str):

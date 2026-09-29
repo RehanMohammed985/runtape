@@ -42,9 +42,7 @@ class Segment:
         elif self.kind == "system":
             head = "system prompt"
         else:
-            head = f"{self.kind} message [{self.msg_index}]"
-            if self.origin is not None:
-                head = f"#{self.origin} " + head
+            head = f"#{self.origin} {self.kind} message" if self.origin is not None else f"{self.kind} message [{self.msg_index}]"
         return head + (f" {self.sub}" if self.sub and not self.sub.startswith(("[", ".")) else self.sub)
 
     def preview(self, limit: int = 80) -> str:

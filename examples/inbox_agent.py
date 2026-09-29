@@ -110,7 +110,10 @@ def simulated_model(req):
 
 def fake_backend():
     """An OpenAI-compatible backend answered by simulated_model, for the offline mode."""
-    import httpx
+    try:  # newer SDKs use httpx2
+        import httpx2 as httpx
+    except ImportError:
+        import httpx
 
     def handler(request):
         body = json.loads(request.content)

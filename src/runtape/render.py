@@ -496,7 +496,7 @@ def _evidence(rep, t) -> Text:
         return Text(f"  Evidence: {b.kept}/{b.n} reruns with it, {t.kept}/{t.n} without.", style="dim")
     return Text(
         f"  Evidence: {b.kept}/{b.n} reruns with it, {t.kept}/{t.n} without. p = {_p(t.p)}, significant after "
-        f"correcting for {t.family} comparisons.",
+        f"correcting for all {t.family} variants tried.",
         style="dim",
     )
 
@@ -506,20 +506,13 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
     tgt = rep.target
     out: list[RenderableType] = []
     head = Text("Why does the agent ", style="bold")
-    if tgt.mode == "tool":
-        call = next((tc for tc in tgt.recorded.tool_calls if tc.get("name") == tgt.tool), None)
-        from .rerun import Reply as _R
-
-        what = _R(None, [call]).describe(100) if call else tgt.describe()
-    else:
-        what = tgt.describe()
-    head.append(what.replace("calls ", "call ", 1) if what.startswith("calls ") else what, style="bold yellow")
+    head.append(tgt.question(), style="bold yellow")
     head.append("?", style="bold")
     out.append(head)
     req = t[tgt.request_id]
     out.append(Text(
-        f"decision at #{tgt.response_id}, model call #{tgt.request_id} ({req.payload.get('model')}), "
-        f"{len(rep.trials)} pieces of context tested",
+        f"decision at #{tgt.response_id} (the model reply), made on model call #{tgt.request_id} "
+        f"({req.payload.get('model')}); {len(rep.trials)} pieces of its context tested",
         style="dim",
     ))
     b = rep.baseline
@@ -530,6 +523,9 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
         alt, cnt = b.top_instead()
         line.append(f"   otherwise {alt} ({cnt})", style="dim")
     out.append(line)
+    if rep.stopped:
+        out.append(Text(f"! Stopped early ({rep.stopped}). The results below are incomplete: a cause may be "
+                        "missing or not yet narrowed down. Raise --budget; finished reruns are cached.", style="bold yellow"))
     for w in rep.warnings:
         out.append(Text("! " + w, style="yellow"))
 
@@ -552,8 +548,13 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                     texts.append(t_)
             for t_ in texts:
                 out.append(Text("  " + clip('"' + t_ + '"', 300)))
-            out.append(Text(f"  The same content appears {len(j.removed)} times in the context, so removing any one "
-                            "copy changes nothing. Removing them all does:", style="magenta"))
+            if len(texts) == 1:
+                why_note = (f"The same content appears {len(j.removed)} times in the context, so removing any one "
+                            "copy changes nothing. Removing them all does:")
+            else:
+                why_note = ("Each of these is enough on its own: removing one changes nothing, removing all of "
+                            "them does:")
+            out.append(Text("  " + why_note, style="magenta"))
             r = Text("  Without them the agent ")
             r.append(f"{tgt.describe()} in {_ratio(j.kept, j.n)} reruns", style="bold")
             if j.top_instead():
@@ -590,7 +591,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
     if rep.joint is not None and rep.joint.kind == "decisive":
         j = rep.joint.finest
         out.append(Rule(style="red"))
-        out.append(Text("CAUSE (combined)  no single piece explains it; together these do:", style="bold red"))
+        out.append(Text("CAUSE (combined)  no single piece changes it; removing all of these together does:",
+                        style="bold red"))
         for seg in j.removed:
             out.append(Text(f"  {seg.where}  " + compact(seg.text, 90)))
         r = Text("  Without all of them the agent ")
@@ -600,25 +602,36 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
         out.append(r)
         out.append(_evidence(rep, j))
 
+    if rep.joint is not None and rep.joint.kind != "decisive":
+        prereq = prereq + [rep.joint]
     if prereq:
-        out.append(Rule("also required: without these the agent stops, asks, or redoes an earlier step", style="dim"))
+        out.append(Rule("also required (without these the agent stops or redoes a step)", style="dim"))
         for c in prereq:
-            seg = c.finest.removed[-1]
+            where = " + ".join(x.where for x in c.finest.removed)
             alt = c.finest.top_instead()
-            row = Text(f"  {seg.where}  ", style="bold")
+            row = Text(f"  {where}  ", style="bold")
             row.append(f"{_ratio(c.finest.kept, c.finest.n)}", style="dim")
             if alt:
                 row.append(f"  instead: {compact(alt[0], 70)}", style="dim")
             out.append(row)
 
-    if not rep.causes and rep.joint is None and not rep.stopped and rep.baseline.kept:
+    headline = decisive or (rep.joint is not None and rep.joint.kind == "decisive")
+    if not headline and not rep.stopped and rep.baseline.kept:
         out.append(Rule(style="yellow"))
+        gaps = []
         if rep.untested:
-            msg = (f"None of the {len(rep.trials)} pieces tested changes this decision when removed. "
-                   f"{len(rep.untested)} less suspicious pieces were not tested (raise --max-pieces to include them).")
+            gaps.append(f"{len(rep.untested)} less suspicious pieces were not tested (--max-pieces)")
+        if rep.unexpanded:
+            gaps.append(f"{rep.unexpanded} pieces were not looked inside for masked causes (--expand)")
+        if prereq:
+            base_msg = ("Nothing in the context steers this decision: removing the pieces above only makes the "
+                        "agent fetch them again or stop.")
         else:
-            msg = ("No piece of the context changes this decision when removed. It comes from the model's own "
-                   "judgment given the task, not from something it read.")
+            base_msg = "No piece of the context changes this decision when removed."
+        if gaps:
+            msg = base_msg + " Not fully checked: " + "; ".join(gaps) + "."
+        else:
+            msg = base_msg + " It comes from the model's own judgment given the task, not from something it read."
         out.append(Text(msg, style="yellow"))
 
     shown = {id(c.top) for c in rep.causes}

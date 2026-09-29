@@ -138,7 +138,7 @@ def build_server(model_fn: str | None = None):
         return "\n".join(f"{sc:5.2f}  {seg.where}  {render.compact(seg.text, 120)}" for sc, seg in rows) or "No suspects."
 
     @mcp.tool()
-    def why(event: str, trace: str = "last", runs: int = 5, budget: int = 150) -> str:
+    def why(event: str, trace: str = "last", runs: int = 5, budget: int = 400) -> str:
         """Prove which part of the context caused a decision (a tool call, model reply, or model call).
         Re-runs that one decision with pieces removed; costs model calls (capped by budget), cached on disk."""
         from .why import why as run_why

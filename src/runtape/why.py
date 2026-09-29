@@ -62,6 +62,7 @@ class Target:
         raise ValueError(self.mode)
 
     def describe(self) -> str:
+        """Present tense, for 'without it the agent ___ in 3/10 reruns'."""
         if self.mode == "tool":
             if self.args is not None:
                 return f"calls {self.tool}({_fmt_args(self.args)})"
@@ -69,8 +70,21 @@ class Target:
         if self.mode == "tools":
             return "calls " + " + ".join(sorted(tc.get("name") for tc in self.recorded.tool_calls))
         if self.mode == "match":
-            return f"output matches /{self.pattern.pattern}/"
-        return "gives the same answer: " + self.recorded.describe(70).removeprefix("replies: ")
+            return f"produces output matching /{self.pattern.pattern}/"
+        return "gives the same answer"
+
+    def question(self) -> str:
+        """Base form, for 'Why does the agent ___?'."""
+        if self.mode == "tool":
+            call = next((tc for tc in self.recorded.tool_calls if tc.get("name") == self.tool), None)
+            if call is not None:
+                return "call " + Reply(None, [call]).describe(110).removeprefix("calls ")
+            return f"call {self.tool}"
+        if self.mode == "tools":
+            return "call " + " + ".join(sorted(tc.get("name") for tc in self.recorded.tool_calls))
+        if self.mode == "match":
+            return f"produce output matching /{self.pattern.pattern}/"
+        return "answer: " + self.recorded.describe(90).removeprefix("replies: ")
 
     def decision_text(self) -> str:
         return _reply_text(self.recorded)
@@ -214,6 +228,7 @@ class Trial:
     kept: int = 0  # runs where the decision still happened
     n: int = 0
     instead: Counter = field(default_factory=Counter)  # what it did when the decision didn't happen
+    examples: dict = field(default_factory=dict, repr=False)  # one reply per alternative, by description
     p: float | None = None  # significance, once confirmed
     family: int = 0  # how many removals it was compared against (for the correction)
 
@@ -271,13 +286,16 @@ class Report:
     threshold: float = 0.5
     alpha: float = 0.05
     deterministic: bool = False
+    confirmed: list = field(default_factory=list)  # every trial that passed the significance test
+    unexpanded: int = 0  # pieces with parts that were not looked inside for masked causes
 
     @property
     def base(self) -> float:
         return self.baseline.rate
 
     def verdict(self, t: Trial) -> str:
-        if any(t is c.finest or t in c.chain for c in self.causes) or (self.joint and t is self.joint.finest):
+        if any(t is x for x in self.confirmed) or any(t is c.finest or t in c.chain for c in self.causes) \
+                or (self.joint and t is self.joint.finest):
             return "cause"
         return "not significant" if t.effect(self.base) >= self.threshold else "none"
 
@@ -336,9 +354,9 @@ class Why:
         alpha: float = 0.05,
         threshold: float = 0.5,
         max_depth: int = 4,
-        max_causes: int = 3,
-        expand: int = 3,
-        max_pieces: int | None = 40,
+        max_causes: int = 8,
+        expand: int = 6,
+        max_pieces: int | None = 80,
         joint_search: bool = True,
         progress: Callable[[str], None] | None = None,
     ):
@@ -363,6 +381,7 @@ class Why:
         self.progress = progress or (lambda msg: None)
         self._decision = target.decision_text()
         self.base_trial = Trial([])
+        self._earlier = None
         self.tested = 0  # every removal compared so far; confirmations correct for all of them
 
     # -- running trials
@@ -377,7 +396,9 @@ class Why:
             if self.target.matches(r):
                 trial.kept += 1
             else:
-                trial.instead[r.describe()] += 1
+                d = r.describe()
+                trial.instead[d] += 1
+                trial.examples.setdefault(d, r)
 
     def _req(self, removed: list[Segment]) -> dict:
         return ablate(self.req, removed) if removed else self.req
@@ -396,7 +417,14 @@ class Why:
         trials = [Trial(list(rm)) for rm in removals]
         self.tested += len(trials)
         reqs = [self._req(rm) for rm in removals]
-        first = self.sampler.many((r, i) for r in reqs for i in range(self.screen))
+        try:
+            first = self.sampler.many((r, i) for r in reqs for i in range(self.screen))
+        except BudgetExceeded as e:  # keep whatever was measured, then stop
+            got = getattr(e, "partial", [])
+            for n, t in enumerate(trials):
+                self._score(t, got[n * self.screen : (n + 1) * self.screen])
+            e.trials = [t for t in trials if t.n]
+            raise
         for n, t in enumerate(trials):
             self._score(t, first[n * self.screen : (n + 1) * self.screen])
         todo = [n for n, t in enumerate(trials) if t.kept < t.n and self.screen < self.k]
@@ -445,14 +473,16 @@ class Why:
 
     def _alt_class(self, t: Trial) -> int:
         """What the agent does without the removed content, ranked by how telling it is:
-        0 a different action, 1 it stops/answers/asks, 2 it redoes a step it already took."""
+        0 a different action, 1 it stops/answers/asks, 2 it repeats a call it already made earlier
+        (same tool and arguments: it is just fetching the removed data again)."""
         alt = t.top_instead()
-        if not alt or not alt[0].startswith("calls "):
+        reply = t.examples.get(alt[0]) if alt else None
+        if reply is None or not reply.tool_calls:
             return 1
-        names = re.findall(r"(?:calls |, )([A-Za-z_][\w.\-]*)\(", alt[0])
-        earlier = {e.payload.get("name") for e in self.trace.events
-                   if e.type == "tool_call" and e.id < self.target.request_id}
-        if names and all(n in earlier for n in names):
+        if self._earlier is None:
+            self._earlier = {(e.payload.get("name"), _canon(_loose(e.payload.get("arguments"))))
+                             for e in self.trace.events if e.type == "tool_call" and e.id < self.target.request_id}
+        if all((tc.get("name"), _canon(_loose(tc.get("arguments")))) in self._earlier for tc in reply.tool_calls):
             return 2
         return 0
 
@@ -513,45 +543,59 @@ class Why:
             segs = pinned + keep
 
         self.progress(f"testing {len(segs)} pieces of context")
-        rep.trials = self._trials([[s] for s in segs])
+        try:
+            rep.trials = self._trials([[s] for s in segs])
+        except BudgetExceeded as e:
+            rep.trials = getattr(e, "trials", [])
+            raise
         family = len(rep.trials)
         cands = sorted((t for t in rep.trials if self._candidate(t)), key=lambda t: -t.effect(self.base))
-        confirmed = []
         for t in cands:
             self.progress(f"confirming {t.removed[0].where}")
             if self._confirm(t, family):
-                confirmed.append(t)
+                rep.confirmed.append(t)
 
-        for t in confirmed[: self.max_causes]:
-            self.progress(f"narrowing down {t.removed[0].where}")
-            rep.causes.append(Cause(self._drill(t, [])))
+        # every confirmed piece is a cause; narrow down the most telling ones (ranked like the report)
+        rep.causes = sorted((Cause([t]) for t in rep.confirmed), key=self._rank_key)
+        # Narrow every one down, including pieces the agent would just fetch again when removed:
+        # the email it re-reads can still contain the sentence that hijacked it.
+        drilled = 0
+        for c in rep.causes:
+            if drilled >= self.max_causes:
+                break
+            drilled += 1
+            self.progress(f"narrowing down {c.top.removed[0].where}")
+            c.chain = self._drill(c.top, [])
 
         # A piece can hold the cause and evidence against it at once (a search result with a stale
         # doc next to the real policy). Removing the whole piece then changes nothing, so look inside
         # the most suspicious pieces that didn't flip.
-        others = [t for t in rep.trials if t not in confirmed and t.removed[0].children()]
+        others = [t for t in rep.trials if not any(t is x for x in rep.confirmed) and t.removed[0].children()]
         for t in others[: self.expand]:
             self.progress(f"looking inside {t.removed[0].where}")
             chain = self._drill(t, [])
             if len(chain) > 1:
                 rep.causes.append(Cause(chain, masked=True))
+        rep.unexpanded = max(0, len(others) - self.expand)
 
-        # A cause that couldn't be narrowed may be repeated elsewhere (a search run twice returns the
-        # same bad doc twice): removing one copy then changes nothing. Look for the smallest set of
-        # parts, in it and in the other suspicious pieces, that changes the decision together.
+        # A cause that couldn't be narrowed may be one of several parts that are each enough on their
+        # own (the same bad doc returned by two searches, two different lines saying the same thing).
+        # Removing one then changes nothing. Look for the smallest set that changes the decision.
         refined = 0
-        for c in rep.causes:
-            seg = c.top.removed[0]
-            # causes that couldn't be narrowed, up to three (each search costs reruns)
-            if len(c.chain) > 1 or not seg.children() or refined >= 3:
+        for c in sorted(rep.causes, key=self._rank_key):
+            # the most specific part the cause was narrowed to; if it still has parts, none of them
+            # alone was enough, so they may each be sufficient on their own
+            seg = c.finest.removed[-1]
+            if refined >= 3 or not seg.children() or self._alt_class(c.finest) == 2:
                 continue
             refined += 1
             cands = list(seg.children())
-            for t in others[: self.expand]:
-                if t.removed[0] is not seg:
-                    cands.extend(t.removed[0].children())
+            if len(c.chain) == 1:  # a whole piece: its content may also repeat in other pieces
+                for t in others[: self.expand]:
+                    if t.removed[0] is not seg:
+                        cands.extend(t.removed[0].children())
             if len(cands) > 1:
-                self.progress(f"narrowing down {seg.where} across repeated content")
+                self.progress(f"narrowing down {seg.where} across parts that repeat each other")
                 j = self._joint(cands)
                 if j is not None:
                     c.refined = j
@@ -559,7 +603,7 @@ class Why:
         rep.causes.sort(key=self._rank_key)
         if not any(self._alt_class(c.refined or c.finest) == 0 for c in rep.causes) and self.joint_search:
             expanded = {id(t.removed[0]) for t in others[: self.expand]}
-            # hold needed inputs fixed: the question is what makes the agent act differently
+            # hold known causes fixed: the question is what else makes the agent act differently
             needed = {id(c.top.removed[0]) for c in rep.causes}
             cands2: list[Segment] = []
             for sg in segs:
@@ -573,12 +617,13 @@ class Why:
                 if joint is not None:
                     rep.joint = Cause([joint])
 
-        # the leading cause, and any that make the agent act differently, get the full report; the rest
-        # (it stops without them, or redoes an earlier step) are listed as also required
+        # The headline is the most telling cause. A piece whose removal only makes the agent fetch
+        # the same data again is never the headline: it is input, not the reason for the choice.
         allc = rep.causes + ([rep.joint] if rep.joint else [])
-        best = min(allc, key=self._rank_key) if allc else None
+        eligible = [c for c in allc if self._alt_class(c.refined or c.finest) != 2]
+        best = min(eligible, key=self._rank_key) if eligible else None
         for c in allc:
-            c.kind = "decisive" if c is best or self._alt_class(c.refined or c.finest) == 0 else "prerequisite"
+            c.kind = "decisive" if (c is best or self._alt_class(c.refined or c.finest) == 0) else "prerequisite"
 
     def _drill(self, top: Trial, held: list[Segment]) -> list[Trial]:
         """Follow a cause down into smaller and smaller pieces while they still flip the decision."""
@@ -698,12 +743,13 @@ def why(
     match: str | None = None,
     exact_args: bool = False,
     judge: Callable[[Reply, Reply], bool] | None = None,
-    budget: int | None = 300,
+    budget: int | None = 400,
     cache_dir: str | None = ".runtape/cache",
     workers: int = 8,
     threshold: float = 0.5,
     alpha: float = 0.05,
-    max_pieces: int | None = 40,
+    max_pieces: int | None = 80,
+    expand: int = 6,
     progress: Callable[[str], None] | None = None,
     on_call: Callable[[], None] | None = None,
 ) -> Report:
@@ -728,12 +774,12 @@ def why(
         else:
             target.judge = llm_judge(sampler, req)
     rep = Why(trace, target, sampler, k=runs, screen=screen, confirm=confirm, threshold=threshold, alpha=alpha,
-              max_pieces=max_pieces, progress=progress).run()
+              max_pieces=max_pieces, expand=expand, progress=progress).run()
     rep.warnings[:0] = notes
     return rep
 
 
-def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, max_pieces: int | None = 40) -> tuple[int, int]:
+def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, max_pieces: int | None = 80) -> tuple[int, int]:
     """(likely, worst case) number of model calls a why run will make."""
     rid, _ = request_for(trace, event_id)
     req = build_request(trace, rid)

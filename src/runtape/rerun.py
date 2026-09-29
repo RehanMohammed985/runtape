@@ -434,7 +434,13 @@ class Sampler:
             if self.budget is not None and self.calls >= self.budget:
                 raise BudgetExceeded(f"hit the budget of {self.budget} model calls")
             self.calls += 1
-        reply = Reply.from_any(self.model(req))
+        try:
+            reply = Reply.from_any(self.model(req))
+        except Exception as e:
+            if isinstance(self.model, FunctionModel):
+                raise RuntimeError(f"the model function raised {type(e).__name__}: {e} "
+                                   "(it must handle any variant of the context, including removed content)") from e
+            raise
         if path:
             path.write_text(json.dumps(to_jsonable(reply.to_dict()), ensure_ascii=False))
         if self.on_call:

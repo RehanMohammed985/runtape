@@ -18,3 +18,23 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  fresh-install:
+    # a new user's install: no dev extras, only what the README says to install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install . openai anthropic
+      - name: demos and why, offline
+        run: |
+          mkdir /tmp/try && cd /tmp/try
+          python $GITHUB_WORKSPACE/examples/refund_bot.py
+          runtape why last tool:issue_refund --model-fn $GITHUB_WORKSPACE/examples/refund_bot.py:simulated_model | tee why1.txt
+          grep -q "CAUSE" why1.txt
+          python $GITHUB_WORKSPACE/examples/inbox_agent.py
+          runtape why last tool:forward_email --model-fn $GITHUB_WORKSPACE/examples/inbox_agent.py:simulated_model | tee why2.txt
+          grep -q "Note to AI assistants" why2.txt
+          runtape summary
