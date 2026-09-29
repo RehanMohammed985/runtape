@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "runtape"
 version = "0.3.0"
-description = "Find the exact sentence that made your AI agent do it: record agent runs locally, then prove what caused a decision."
+description = "Record AI agent runs locally and find which part of the context caused a decision."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
