@@ -210,6 +210,70 @@ def extract(req: dict, trace: Trace | None = None, request_id: int | None = None
     return segs
 
 
+def _intro_map(trace: Trace, request_id: int) -> list[int]:
+    """For each message of a request, the llm_request that first sent it.
+
+    Requests are processed in order. A delta-encoded request inherits its base's labels and
+    adds its own for the appended messages. A request that sent its history in full (the first
+    one, or an agent that trimmed or rewrote its history) is aligned to an earlier request: its
+    messages usually start with a tail of that request's messages, followed by new ones. Only
+    when no such tail exists (a summarized history) are messages matched by content.
+    """
+    cache = trace.__dict__.setdefault("_intro_cache", {})
+    if request_id in cache:
+        return cache[request_id]
+    reqs = [e for e in trace.events if e.type == "llm_request" and e.id <= request_id]
+    keys: dict[int, list[str]] = {}
+
+    def k(rid: int) -> list[str]:
+        if rid not in keys:
+            keys[rid] = [json.dumps(m, sort_keys=True) for m in trace.messages(rid)]
+        return keys[rid]
+
+    done: list[int] = []
+    for e in reqs:
+        if e.id in cache:
+            done.append(e.id)
+            continue
+        base = e.payload.get("base")
+        if base is not None and base in cache:
+            n = len(trace.messages(e.id))
+            cache[e.id] = cache[base] + [e.id] * (n - len(cache[base]))
+            done.append(e.id)
+            continue
+        msgs = k(e.id)
+        # A full list is never an exact resend (the recorder would have stored that as a delta),
+        # so it ends with at least one new message: prefer alignments that leave room for one.
+        best = None  # (leaves a new message, kept length, earlier request, offset)
+        for prev in reversed(done[-8:]):
+            h = k(prev)
+            if len(h) > 4000 or len(msgs) > 4000:
+                continue
+            first = msgs[0] if msgs else None
+            for off in range(len(h)):
+                if h[off] != first:
+                    continue
+                tail = h[off:]
+                if len(tail) <= len(msgs) and msgs[: len(tail)] == tail:
+                    cand = (len(tail) < len(msgs), len(tail), prev, off)
+                    if best is None or cand[:2] > best[:2]:
+                        best = cand
+        if best is not None:
+            _, kept, prev, off = best
+            cache[e.id] = cache[prev][off:] + [e.id] * (len(msgs) - kept)
+        else:
+            # rewritten history: match by content, newest earlier occurrence first
+            seen: dict[str, list[int]] = {}
+            for prev in done:
+                for key, origin in zip(k(prev), cache[prev]):
+                    lst = seen.setdefault(key, [])
+                    if origin not in lst:
+                        lst.append(origin)
+            cache[e.id] = [(seen.get(key) or [e.id])[-1] for key in msgs]
+        done.append(e.id)
+    return cache[request_id]
+
+
 def _origin_maps(trace: Trace, request_id: int) -> dict:
     """Where each message of a request came from in the trace.
 
@@ -218,17 +282,7 @@ def _origin_maps(trace: Trace, request_id: int) -> dict:
     """
     import bisect
 
-    first_seen: dict[str, int] = {}  # canonical message -> first request that sent it
-    for e in trace.events:
-        if e.id > request_id:
-            break
-        if e.type != "llm_request":
-            continue
-        new = e.payload.get("messages") if "messages" in e.payload else e.payload.get("messages_append", [])
-        for m in new or []:
-            first_seen.setdefault(json.dumps(m, sort_keys=True), e.id)
-    msgs = trace.messages(request_id)
-    intro = [first_seen.get(json.dumps(m, sort_keys=True), request_id) for m in msgs]
+    intro = _intro_map(trace, request_id)
 
     # call id -> [(tool_result event, tool name)] in order; ids can repeat across a run
     calls: dict[str, list[tuple[int, str]]] = {}

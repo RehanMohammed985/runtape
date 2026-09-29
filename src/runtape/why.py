@@ -173,11 +173,21 @@ def llm_judge(sampler: Sampler, like: dict) -> Callable[[Reply, Reply], bool]:
 _WORDS = re.compile(r"[a-z0-9$.]+")
 
 
+_NEG = {"not", "no", "never", "don't", "dont", "doesn't", "doesnt", "can't", "cant", "cannot", "won't", "wont",
+        "shouldn't", "shouldnt", "isn't", "isnt", "aren't", "arent", "didn't", "didnt", "without", "nothing", "none"}
+
+
 def text_judge(a: Reply, b: Reply) -> bool:
-    """Wording-based comparison, used when there is no live model to judge with."""
-    wa, wb = set(_WORDS.findall((a.text or "").lower())), set(_WORDS.findall((b.text or "").lower()))
+    """Wording-based comparison, used when there is no live model to judge with.
+    Close wording counts as the same answer unless one of them negates it."""
+    ta, tb = (a.text or "").lower(), (b.text or "").lower()
+    wa, wb = set(_WORDS.findall(ta)), set(_WORDS.findall(tb))
     if not wa and not wb:
         return True
+    na = {w for w in re.findall(r"[a-z']+", ta) if w in _NEG}
+    nb = {w for w in re.findall(r"[a-z']+", tb) if w in _NEG}
+    if na != nb:
+        return False
     return len(wa & wb) / max(len(wa | wb), 1) >= 0.7
 
 
@@ -438,7 +448,7 @@ class Why:
             return "decisive"
         text = cause.top.removed[0].text.lower()
         for v in _arg_values(self.target):
-            if v in text:
+            if re.search(r"(?<![\w.])" + re.escape(v) + r"(?![\w])", text):
                 return "prerequisite"
         return "decisive"
 
@@ -481,8 +491,11 @@ class Why:
         segs = self._rank(all_segs)
         if self.max_pieces and len(segs) > self.max_pieces:
             # always test the system prompt and the newest message, whatever their rank
-            last = max((s.msg_index for s in all_segs if s.msg_index is not None), default=None)
-            pinned = [s for s in segs if s.kind == "system" or (last is not None and s.msg_index == last)]
+            # always test the system prompt, the first user message (the task) and the newest message
+            idx = [s.msg_index for s in all_segs if s.msg_index is not None]
+            last = max(idx, default=None)
+            first_user = min((s.msg_index for s in all_segs if s.kind == "user" and s.msg_index is not None), default=None)
+            pinned = [s for s in segs if s.kind == "system" or s.msg_index in (last, first_user)]
             keep = [s for s in segs if s not in pinned][: max(0, self.max_pieces - len(pinned))]
             rep.untested = [s for s in segs if s not in keep and s not in pinned]
             segs = pinned + keep
@@ -616,9 +629,10 @@ def _arg_values(target: Target) -> list[str]:
         if isinstance(v, bool) or v is None:
             return
         if isinstance(v, (int, float)):
-            out.append(repr(v))
-            if isinstance(v, float) and v.is_integer():
-                out.append(str(int(v)))
+            # short numbers ("1", "42") appear everywhere; only distinctive ones count
+            for form in {repr(v), str(int(v)) if isinstance(v, float) and v.is_integer() else repr(v)}:
+                if len(form) >= 3:
+                    out.append(form)
         elif isinstance(v, str) and len(v.strip()) >= 3:
             out.append(v.lower())
         elif isinstance(v, dict):

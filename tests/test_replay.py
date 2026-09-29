@@ -211,3 +211,46 @@ def test_extra_call_beyond_recording(tmp_path):
             c = rp.wrap(anthropic_client(Script([])))
             c.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "x"}])
             c.messages.create(model="m", max_tokens=5, messages=[{"role": "user", "content": "y"}])
+
+
+def test_tools_from_an_earlier_turn_are_not_reused(tmp_path):
+    # turn 1: get_time -> 10:00, send_email ; turn 2: get_time -> 10:05
+    s = Script([an_msg(tool_uses=[("t1", "get_time", {}), ("t2", "send_email", {"to": "a"})], stop="tool_use"),
+                an_msg(tool_uses=[("t3", "get_time", {})], stop="tool_use"),
+                an_msg("done")])
+    rec = runtape.record(tmp_path / "o.jsonl")
+    c = rec.wrap(anthropic_client(s))
+    times = iter(["10:00", "10:05"])
+    get_time = rec.tool(name="get_time")(lambda: next(times))
+    send_email = rec.tool(name="send_email")(lambda to: "sent")
+    msgs = [{"role": "user", "content": "go"}]
+    for _ in range(3):
+        r = c.messages.create(model="m", max_tokens=5, messages=msgs)
+        msgs = msgs + [{"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in r.content]}]
+        outs = []
+        for b in r.content:
+            if b.type == "tool_use":
+                out = {"get_time": get_time, "send_email": send_email}[b.name](**b.input)
+                outs.append({"type": "tool_result", "tool_use_id": b.id, "content": str(out)})
+        if not outs:
+            break
+        msgs = msgs + [{"role": "user", "content": outs}]
+    rec.close()
+
+    # replay with code that skips turn 1's tools entirely: turn 2's get_time must not get 10:00
+    with pytest.raises(ReplayDiverged):
+        with runtape.replay(tmp_path / "o.jsonl", tmp_path / "r.jsonl") as rp:
+            c = rp.wrap(anthropic_client(Script([])))
+            gt = rp.tool(name="get_time")(lambda: None)
+            m = [{"role": "user", "content": "go"}]
+            r = c.messages.create(model="m", max_tokens=5, messages=m)
+            m = m + [{"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in r.content]},
+                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "skipped"}]}]
+            c.messages.create(model="m", max_tokens=5, messages=m)  # differs from recording: diverges here
+
+
+def test_replay_never_imports_modules_named_in_a_trace(tmp_path, capsys):
+    from runtape.replay import _restore
+
+    assert _restore({"a": 1}, "dataclass:this:Anything") == {"a": 1}
+    assert "Zen of Python" not in capsys.readouterr().out

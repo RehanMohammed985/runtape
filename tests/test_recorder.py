@@ -274,3 +274,68 @@ def test_failed_redaction_never_writes_secrets(tpath):
     assert "hunter2" not in text
     t = Trace.load(tpath)  # still a valid trace
     assert t.status == "ok"
+
+
+def test_recording_to_the_same_path_twice_replaces_the_run(tpath):
+    for word in ("first", "second"):
+        with Recorder(tpath, name=word) as rec:
+            rec.note(word)
+    ev = lines(tpath)
+    assert [e["id"] for e in ev] == [0, 1, 2]
+    assert ev[0]["payload"]["name"] == "second"
+
+
+def test_redaction_failure_on_a_model_call_keeps_later_calls_whole(tpath):
+    def redact(ev):
+        if ev["id"] == 2:  # the redactor breaks on one call only
+            raise RuntimeError("nope")
+        return ev
+
+    with Recorder(tpath, redact=redact) as rec:
+        h = [{"role": "user", "content": "hi"}]
+        rec.log_llm_request(provider="anthropic", model="m", system="S", messages=h)
+        h = h + [{"role": "assistant", "content": "the secret is 42"}]
+        rec.log_llm_request(provider="anthropic", model="m", system="S", messages=h)  # redaction fails
+        h = h + [{"role": "user", "content": "thanks"}]
+        r3 = rec.log_llm_request(provider="anthropic", model="m", system="S", messages=h)
+    t = Trace.load(tpath)
+    assert "redact function failed" in json.dumps(t[2].payload)
+    # the third call doesn't build on the dropped one: its history and system prompt are complete
+    assert t[r3].payload.get("base") != 2
+    assert [m["content"] for m in t.messages(r3)] == ["hi", "the secret is 42", "thanks"]
+    assert t.context(r3).system == "S"
+
+
+def test_thread_exceptions_are_recorded(tmp_path):
+    r = _run(
+        """
+        import threading, runtape
+        rec = runtape.record("t.jsonl")
+        th = threading.Thread(target=lambda: 1 / 0, name="worker-1")
+        th.start(); th.join()
+        rec.close()
+        """,
+        tmp_path,
+    )
+    t = Trace.load(tmp_path / "t.jsonl")
+    err = t.of_type("error")[0]
+    assert err.payload["type"] == "ZeroDivisionError" and err.payload["thread"] == "worker-1"
+
+
+def test_link_tolerates_converted_arguments_and_expires_stale_requests(tpath):
+    with Recorder(tpath) as rec:
+        refund = rec.tool(name="refund")(lambda amount: "ok")
+        search = rec.tool(name="search")(lambda q: "ok")
+        rid = rec.log_llm_request(provider="anthropic", model="m", messages=[{"role": "user", "content": "x"}])
+        rec.log_llm_response(rid, text=None, tool_calls=[{"id": "r1", "name": "refund", "arguments": {"amount": "2400"}},
+                                                        {"id": "s1", "name": "search", "arguments": {"q": "policy"}}],
+                             stop_reason="tool_use", raw=None, latency_ms=1)
+        refund(amount=2400.0)  # code converted the string
+        for _ in range(6):  # several later replies: the unused search request goes stale
+            r = rec.log_llm_request(provider="anthropic", model="m", messages=[{"role": "user", "content": "y"}])
+            rec.log_llm_response(r, text="k", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1)
+        search(q="policy")  # called by code much later
+    t = Trace.load(tpath)
+    calls = {c.payload["name"]: c for c in t.of_type("tool_call")}
+    assert calls["refund"].payload.get("call_id") == "r1"
+    assert "call_id" not in calls["search"].payload

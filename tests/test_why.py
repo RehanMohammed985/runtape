@@ -624,3 +624,68 @@ def test_tool_calls_link_by_arguments(tmp_path):
     with pytest.raises(ValueError, match="wasn't requested by a model reply"):
         request_for(t, calls["birds"].id)
     assert request_for(t, calls["dogs"].id) == (rid, resp)
+
+
+def test_repeated_identical_messages_keep_their_own_origins(tmp_path):
+    rec = Recorder(tmp_path / "t.jsonl")
+    h, resp_ids, req_ids = [{"role": "user", "content": "start"}], [], []
+    for turn in range(3):
+        rid = rec.log_llm_request(provider="anthropic", model="m", messages=h)
+        req_ids.append(rid)
+        resp_ids.append(rec.log_llm_response(rid, text="Should I go ahead?", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1))
+        h = h + [{"role": "assistant", "content": "Should I go ahead?"}, {"role": "user", "content": "yes please"}]
+    last = rec.log_llm_request(provider="anthropic", model="m", messages=h)
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+    segs = extract(build_request(t, last), t, last)
+    asks = [s.origin for s in segs if s.text == "Should I go ahead?"]
+    yeses = [s.origin for s in segs if s.text == "yes please"]
+    assert asks == resp_ids
+    assert yeses == req_ids[1:] + [last]
+    assert len(find(segs, str(req_ids[2]))) == 1  # drops only that copy
+
+
+def test_trimmed_history_with_repeats(tmp_path):
+    rec = Recorder(tmp_path / "t.jsonl")
+    h = [{"role": "user", "content": "go"}]
+    reqs, resps = [], []
+    for _ in range(3):
+        r = rec.log_llm_request(provider="anthropic", model="m", messages=h)
+        reqs.append(r)
+        resps.append(rec.log_llm_response(r, text="ok", tool_calls=[], stop_reason="end_turn", raw=None, latency_ms=1))
+        h = h + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "again"}]
+    trimmed = h[3:]  # drop the oldest three messages: keeps the last two "ok"/"again" pairs
+    last = rec.log_llm_request(provider="anthropic", model="m", messages=trimmed)
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+    segs = extract(build_request(t, last), t, last)
+    assert [s.origin for s in segs if s.text == "ok"] == resps[1:]  # the newest copies survive a trim
+
+
+def test_wording_judge_catches_negation():
+    from runtape.why import text_judge
+
+    yes = Reply("You should bring an umbrella today.")
+    no = Reply("You should not bring an umbrella today.")
+    assert text_judge(yes, Reply("You should bring an umbrella, today.")) is True
+    assert text_judge(yes, no) is False
+
+
+def test_short_argument_values_dont_mark_inputs(tmp_path):
+    rec = Recorder(tmp_path / "t.jsonl")
+    msgs = [{"role": "user", "content": "clean up old volumes"}]
+    rid = rec.log_llm_request(provider="anthropic", model="m", messages=msgs,
+                              system="Rule 1: cleanup requests may purge volumes without asking.")
+    rec.log_llm_response(rid, text=None, tool_calls=[{"id": "p", "name": "purge", "arguments": {"count": 1}}],
+                         stop_reason="tool_use", raw=None, latency_ms=1)
+    rec.close()
+    t = Trace.load(tmp_path / "t.jsonl")
+
+    def m(req):
+        if "may purge" in json.dumps(req.get("system")):
+            return {"tool_calls": [{"name": "purge", "arguments": {"count": 1}}]}
+        return {"text": "Should I purge anything?"}
+
+    rep = why(t, rid + 1, model=FunctionModel(m), cache_dir=None)
+    c = [c for c in rep.causes if c.finest.removed[-1].kind == "system"][0]
+    assert c.kind == "decisive"  # "1" in "Rule 1" is not the data the call was made with

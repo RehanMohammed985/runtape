@@ -57,7 +57,8 @@ class Recorder:
             path = Path(dir) / f"{stamp}-{safe}-{self.run_id[:6]}.jsonl"
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a", encoding="utf-8")
+        # one run per file: an existing file at this path is replaced, never appended to
+        self._fh = open(self.path, "w", encoding="utf-8")
         self._lock = threading.RLock()
         self._next_id = 0
         self._redact = redact
@@ -70,6 +71,8 @@ class Recorder:
         self._last_tools: dict[str, str] = {}
         # tool calls the model asked for that no tool has picked up yet
         self._pending_tool_calls: list[dict] = []
+        self._responses_seen = 0
+        self._redact_failed = False
 
         self.log(
             "run_start",
@@ -129,6 +132,7 @@ class Recorder:
                 raise TypeError(f"redact returned {type(out).__name__}, expected the event dict")
             return {**fixed, "payload": to_jsonable(out.get("payload", {})), "meta": to_jsonable(out.get("meta", {}))}
         except Exception as e:
+            self._redact_failed = True
             return {**fixed, "payload": {"__redacted__": "redact function failed; content dropped"},
                     "meta": {"redact_error": repr(e)}}
 
@@ -261,14 +265,13 @@ class Recorder:
             for i in reversed(same_name):
                 if _canon_args(self._pending_tool_calls[i]["arguments"]) == want:
                     return self._pending_tool_calls.pop(i)
-            # model args are a subset of the bound call (the code filled in defaults)
-            if isinstance(arguments, dict):
-                for i in reversed(same_name):
-                    asked = self._pending_tool_calls[i]["arguments"]
-                    if isinstance(asked, dict) and asked and all(
-                        _canon_args(arguments.get(k)) == _canon_args(v) for k, v in asked.items()
-                    ):
-                        return self._pending_tool_calls.pop(i)
+            # the code converted types ("2400" -> 2400.0) or filled in defaults
+            loose = _loose(arguments)
+            for i in reversed(same_name):
+                asked = _loose(self._pending_tool_calls[i]["arguments"])
+                if asked == loose or (isinstance(asked, dict) and isinstance(loose, dict) and asked
+                                      and all(loose.get(k) == v for k, v in asked.items())):
+                    return self._pending_tool_calls.pop(i)
         return None
 
     # ------------------------------------------------------------------- llm
@@ -332,7 +335,17 @@ class Recorder:
                 payload["messages"] = msgs
             payload["params"] = params or {}
 
+            self._redact_failed = False
             rid = self.log("llm_request", payload, meta={"model": model, "provider": provider})
+            if self._redact_failed:
+                # this request's content was dropped: later requests must not build on it, and must
+                # write their system prompt and tools again rather than point back at it
+                self._recent.clear()
+                self._last_system.pop(provider, None)
+                self._last_tools.pop(provider, None)
+                self._last_system[provider] = "\x00dropped"
+                self._last_tools[provider] = "\x00dropped"
+                return rid
             self._recent.append((rid, ser))
             if len(self._recent) > _RECENT_REQUESTS:
                 self._recent.pop(0)
@@ -357,12 +370,16 @@ class Recorder:
                 meta={"latency_ms": round(latency_ms, 2), "tokens": tokens or {}, "model": model},
                 parent=request_id,
             )
-            # keep unclaimed requests from earlier replies too: several agents can share a recorder
+            # keep unclaimed requests from the last few replies (several agents can share a recorder),
+            # but let old ones expire so a later call made by code isn't linked to a stale request
+            self._responses_seen += 1
+            self._pending_tool_calls = [tc for tc in self._pending_tool_calls
+                                        if self._responses_seen - tc["seq"] < 5]
             self._pending_tool_calls.extend(
-                {"id": tc.get("id"), "name": tc.get("name"), "arguments": tc.get("arguments"), "response_event": eid}
+                {"id": tc.get("id"), "name": tc.get("name"), "arguments": tc.get("arguments"),
+                 "response_event": eid, "seq": self._responses_seen}
                 for tc in tool_calls
             )
-            del self._pending_tool_calls[:-200]
         return eid
 
 
@@ -392,13 +409,31 @@ def _install_excepthook() -> None:
 
     sys.excepthook = hook
 
+    import threading
+
+    prev_thread = threading.excepthook
+
+    def thread_hook(args):
+        rec = _current
+        if rec is not None and not rec._closed and args.exc_value is not None:
+            try:
+                rec.log("error", {**_exc_payload(args.exc_value),
+                                  "thread": getattr(args.thread, "name", None)})
+            except Exception:
+                pass
+        prev_thread(args)
+
+    threading.excepthook = thread_hook
+
 
 
 def _type_tag(v: Any) -> str | None:
     """How to rebuild a tool result that JSON can't represent exactly."""
     import dataclasses as _dc
 
-    if isinstance(v, tuple) and not hasattr(v, "_fields"):
+    if isinstance(v, tuple) and hasattr(v, "_fields"):
+        return f"namedtuple:{type(v).__module__}:{type(v).__qualname__}"
+    if isinstance(v, tuple):
         return "tuple"
     if isinstance(v, (set, frozenset)):
         return "set"
@@ -409,6 +444,25 @@ def _type_tag(v: Any) -> str | None:
     if hasattr(cls, "model_validate") and hasattr(v, "model_dump"):
         return "pydantic:" + where
     return None
+
+
+def _loose(v: Any) -> Any:
+    """Arguments normalized for matching: numbers and numeric strings compare equal."""
+    v = to_jsonable(v)
+    if isinstance(v, dict):
+        return {k: _loose(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_loose(x) for x in v]
+    if isinstance(v, bool) or v is None:
+        return v
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except ValueError:
+            return v.strip()
+    return v
 
 
 def _canon_args(v: Any) -> str:

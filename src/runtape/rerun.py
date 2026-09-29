@@ -353,10 +353,13 @@ def model_identity(model: Any) -> str:
     if isinstance(model, FunctionModel):
         fn = model.fn
         name = f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', type(fn).__name__)}"
-        try:
-            src = inspect.getsource(fn)
-        except (OSError, TypeError):
-            src = repr(fn)
+        parts = []
+        for obj in (fn, inspect.getmodule(fn)):  # the function itself, and the file around it (its helpers)
+            try:
+                parts.append(inspect.getsource(obj) if obj is not None else "")
+            except (OSError, TypeError):
+                parts.append(repr(obj))
+        src = "\n".join(parts)
         return "fn:" + name + ":" + hashlib.sha256(src.encode()).hexdigest()[:16]
     return "api:" + type(model).__name__
 

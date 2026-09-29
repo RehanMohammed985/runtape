@@ -186,16 +186,24 @@ receives each event as a dict before it is written.
 - **why** reruns a real model, so it costs tokens: typically 100 to 200 calls
   on one context. **--dry**, **--budget** and **--max-pieces** keep that in
   check, and results are cached.
-- It favors precision over sensitivity. In testing, a model that refunds at
-  random produced no false causes in 100 runs. A cause that moves the decision
-  from 90% to 10% was found 20 times out of 20. A weak one (70% to 30%) was
-  found about half the time. For noisy decisions, raise **--runs**.
-- At temperature 0 each variant is rerun twice instead of five times.
+- It favors precision over sensitivity. With a simulated model that ignores
+  its context and decides at random, false causes showed up in 0 to 5 runs per
+  100, in line with the 5% significance level it uses. A cause that moves the
+  decision from 90% to 10% was found every time; a weaker one (90% to 30%) about
+  4 times in 5, and narrowing it to the exact sentence takes stronger effects.
+  For noisy decisions, raise **--runs**.
+- At temperature 0 each variant is rerun once, and a candidate cause twice.
 - Removing a piece replaces it with **[content removed]**. The marker itself
   can occasionally influence a model.
 - Replay serves non-streamed calls. A streamed call counts as a divergence
   (or goes live with **on_diverge="live"**). LangChain runs can be recorded and
   explained, but not replayed yet.
+- Cached replies are keyed by the request and the model. For **--model-fn**
+  that includes the function's file; if it depends on code elsewhere that you
+  change, pass **--no-cache**.
+- Replay rebuilds top-level dataclasses, Pydantic models, tuples and
+  namedtuples from modules your code has imported. Nested objects come back as
+  plain dicts and lists.
 - Rerunning needs the model the agent used. Other providers work through
   **--model-fn**, which takes any function from a request to a reply. With a
   model function, text answers are compared by wording, so **--match** gives

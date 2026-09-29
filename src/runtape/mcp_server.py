@@ -41,11 +41,11 @@ def _trace(trace: str) -> Trace:
         raise ValueError(str(e.code)) from None
 
 
-def _event(t: Trace, ref: str | int) -> int:
-    from .cli import resolve_event
+def _event(t: Trace, ref: str | int, decision: bool = False) -> int:
+    from .cli import resolve_decision, resolve_event
 
     try:
-        return resolve_event(t, str(ref))
+        return (resolve_decision if decision else resolve_event)(t, str(ref))
     except SystemExit as e:
         raise ValueError(str(e.code)) from None
 
@@ -134,7 +134,7 @@ def build_server(model_fn: str | None = None):
         from .why import suspects
 
         t = _trace(trace)
-        rows = suspects(t, _event(t, event))
+        rows = suspects(t, _event(t, event, decision=True))
         return "\n".join(f"{sc:5.2f}  {seg.where}  {render.compact(seg.text, 120)}" for sc, seg in rows) or "No suspects."
 
     @mcp.tool()
@@ -144,7 +144,7 @@ def build_server(model_fn: str | None = None):
         from .why import why as run_why
 
         t = _trace(trace)
-        rep = run_why(t, _event(t, event), model=model(), runs=runs, budget=budget)
+        rep = run_why(t, _event(t, event, decision=True), model=model(), runs=runs, budget=budget)
         return _text(render.show_why(rep, show_all=True))
 
     @mcp.tool()
@@ -163,7 +163,7 @@ def build_server(model_fn: str | None = None):
         from .rerun import rerun as do_rerun
 
         t = _trace(trace)
-        dist = do_rerun(t, _event(t, event), runs=runs, drop=drop or [], replace=replace, system=system,
+        dist = do_rerun(t, _event(t, event, decision=True), runs=runs, drop=drop or [], replace=replace, system=system,
                         model_name=model_name, model=model())
         what = "; ".join(dist.notes) if dist.notes else "unchanged context"
         return _text(render.show_distribution(dist, dist.recorded, title=f"rerun ({what}), {len(dist)} runs"))

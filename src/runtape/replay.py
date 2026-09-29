@@ -67,13 +67,17 @@ def _restore(value: Any, tag: str | None) -> Any:
         kind, mod, qual = tag.split(":", 2)
         if "<locals>" in qual:
             return value
-        import importlib
+        import sys
 
-        obj = importlib.import_module(mod)
+        obj = sys.modules.get(mod)  # only types the running code already imported: no import side effects
+        if obj is None:
+            return value
         for part in qual.split("."):
             obj = getattr(obj, part)
         if kind == "dataclass":
             return obj(**value)
+        if kind == "namedtuple":
+            return obj(*value)
         if kind == "pydantic":
             return obj.model_validate(value)
     except Exception:
@@ -118,6 +122,7 @@ class Replayer(Recorder):
         self._tool_calls = self.source.of_type("tool_call")
         self._ri = 0
         self._used_tools: set[int] = set()
+        self._turn_start = -1  # id of the recorded model call served most recently
         self._live = False
 
     # ------------------------------------------------------------ helpers
@@ -225,6 +230,7 @@ class Replayer(Recorder):
                 rp._diverge(Divergence("model_call", rp._ri + 1, rp._reqs[rp._ri].id, "response",
                                        "(recorded reply can't be served: streamed or not stored)", None))
                 return None, rid
+            rp._turn_start = rp._reqs[rp._ri].id
             rp._ri += 1
             rp.stats.served_model_calls += 1
             out = adapter.response(obj)
@@ -283,8 +289,10 @@ class Replayer(Recorder):
                     return False, None, cid
                 # match any not-yet-used recorded call in the current turn with the same name and
                 # arguments: order within a turn and tools left unwrapped don't matter
+                # the current turn: after the last model call served, before the next recorded one
                 limit = self._reqs[self._ri].id if self._ri < len(self._reqs) else float("inf")
-                window = [e for e in self._tool_calls if e.id < limit and e.id not in self._used_tools]
+                window = [e for e in self._tool_calls
+                          if self._turn_start < e.id < limit and e.id not in self._used_tools]
                 want = _canon(arguments)
                 rec = next((e for e in window if e.payload.get("name") == tool_name
                             and _canon(e.payload.get("arguments")) == want), None)
@@ -298,8 +306,12 @@ class Replayer(Recorder):
                                                  "(no recorded call to this tool in this turn)",
                                                  {"name": tool_name, "arguments": arguments}))
                     return False, None, cid
-                self._used_tools.add(rec.id)
                 res = next((e for e in self.source.children(rec.id) if e.type == "tool_result"), None)
+                if res is not None and "__truncated__" in json.dumps(res.payload.get("result"))[:10_000_000]:
+                    self._diverge(Divergence("tool_call", step, rec.id, "result",
+                                             "(recorded result was too large and was truncated)", None))
+                    return False, None, cid
+                self._used_tools.add(rec.id)
                 self.stats.served_tool_calls += 1
                 return True, res, cid
 
