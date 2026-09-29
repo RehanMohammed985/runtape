@@ -233,3 +233,44 @@ def test_system_and_tools_removed_later_are_not_inherited(tpath):
     assert t.context(r3).system == "You are a pirate." and t.context(r3).tools is None
     # a first call with nothing writes nothing
     assert "system" not in Trace.load(tpath)[r1].payload or True
+
+
+def test_recorder_survives_hostile_values(tpath):
+    class BadRepr:
+        def __repr__(self):
+            raise ValueError("no repr")
+
+    cyc = {"name": "loop"}
+    cyc["self"] = cyc
+    shared = [1]
+    for _ in range(40):  # 2^40 paths if expanded naively
+        shared = [shared, shared]
+    with Recorder(tpath) as rec:
+
+        @rec.tool
+        def returns_bad():
+            return BadRepr()
+
+        assert isinstance(returns_bad(), BadRepr)  # the tool's result still reaches the caller
+        rec.state("cycle", cyc)
+        rec.state("shared", shared)
+        rec.state("nan", float("nan"))
+    ev = lines(tpath)
+    assert [e["id"] for e in ev] == list(range(len(ev)))
+    by_key = {e["payload"].get("key"): e["payload"].get("value") for e in ev if e["type"] == "state"}
+    assert by_key["cycle"]["self"] == {"__cycle__": "dict"}
+    assert "__truncated__" in json.dumps(by_key["shared"])
+    assert by_key["nan"] == "nan"
+    assert tpath.stat().st_size < 5_000_000
+
+
+def test_failed_redaction_never_writes_secrets(tpath):
+    def bad(ev):
+        return None
+
+    with Recorder(tpath, redact=bad) as rec:
+        rec.note("password is hunter2")
+    text = tpath.read_text()
+    assert "hunter2" not in text
+    t = Trace.load(tpath)  # still a valid trace
+    assert t.status == "ok"

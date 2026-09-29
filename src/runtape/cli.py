@@ -57,6 +57,16 @@ def resolve_trace(arg: str | None) -> Path:
     return traces[-1]
 
 
+def resolve_decision(trace: Trace, arg: str | int) -> int:
+    """Like resolve_event, but 'last' means the last model decision rather than run_end."""
+    if isinstance(arg, str) and arg in ("last", "end", "$"):
+        resp = trace.of_type("llm_response")
+        if not resp:
+            raise SystemExit("This trace has no model replies to explain.")
+        return resp[-1].id
+    return resolve_event(trace, arg)
+
+
 def resolve_event(trace: Trace, arg: str | int) -> int:
     if isinstance(arg, str) and ":" in arg and arg.split(":", 1)[0] in ("tool", "error", "state"):
         # tool:NAME -> the last call of that tool; error: -> last error; state:KEY -> last state change
@@ -76,6 +86,8 @@ def resolve_event(trace: Trace, arg: str | int) -> int:
             return trace.events[0].id
         raise SystemExit(f"'{arg}' is not an event number.")
     if n < 0:
+        if -n > len(trace.events):
+            raise SystemExit(f"No event #{n}. Trace has {len(trace.events)} events.")
         n = trace.events[n].id
     if n not in {e.id for e in trace.events}:
         raise SystemExit(f"No event #{n}. Trace has events 0-{trace.events[-1].id}.")
@@ -418,7 +430,14 @@ class Replay(cmd.Cmd):
         except (argparse.ArgumentError, SystemExit, ValueError) as e:
             self.c.print(Text(f"{prog}: {e}", style="red"))
             return None
-        a.event = self._event_arg(a.event) if a.event else self.cur
+        if a.event in ("last", "end", "$"):
+            try:
+                a.event = resolve_decision(self.trace, a.event)
+            except SystemExit as e:
+                self.c.print(Text(str(e), style="red"))
+                return None
+        else:
+            a.event = self._event_arg(a.event) if a.event else self.cur
         return a if a.event is not None else None
 
     def _safely(self, fn) -> None:
@@ -612,22 +631,22 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         elif cmd_name == "diff":
             c.print(render.show_diff(trace, resolve_event(trace, args.a), resolve_event(trace, args.b)))
         elif cmd_name == "why":
-            return run_why(c, trace, resolve_event(trace, args.event), runs=args.runs, tool=args.tool,
+            return run_why(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
                            json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry)
         elif cmd_name == "rerun":
-            return run_rerun(c, trace, resolve_event(trace, args.event), runs=args.runs, drop=args.drop,
+            return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
                              model_fn=args.model_fn, cache=not args.no_cache)
         elif cmd_name == "odds":
-            ev = resolve_event(trace, args.event)
+            ev = resolve_decision(trace, args.event)
             return run_rerun(c, trace, ev, runs=args.runs, model_fn=args.model_fn, cache=not args.no_cache,
                              title=f"odds for decision at #{ev}, identical context")
         elif cmd_name == "replay":
-            start = resolve_event(trace, args.at) if hasattr(args, "at") else 0
+            start = resolve_event(trace, getattr(args, "at", "0"))
             r = Replay(trace, c, start=start)
-            r.model_fn = args.model_fn
+            r.model_fn = getattr(args, "model_fn", None)
             r.overview()
             if start != trace.events[0].id:
                 r.show_current()

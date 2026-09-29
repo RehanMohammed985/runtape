@@ -289,8 +289,16 @@ def ablate(req: dict, segments: list[Segment], replacement: str = REMOVED) -> di
         new = _cut(new, text_spans)
         if not new.strip():
             new = replacement
+        if _is_final_assistant(out, base):
+            new = new.rstrip()  # a trailing-space prefill is rejected by the Anthropic API
         _set(out, base, new)
     return out
+
+
+def _is_final_assistant(req: dict, base: tuple) -> bool:
+    msgs = req.get("messages") or []
+    return (len(base) > 1 and base[0] == "messages" and base[1] == len(msgs) - 1
+            and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "assistant")
 
 
 def _apply_json(obj: Any, segs: list[Segment]) -> Any:
@@ -420,7 +428,8 @@ def replace_text(req: dict, old: str, new: str) -> tuple[dict, int]:
         nonlocal count
         if isinstance(v, str):
             count += v.count(old)
-            return v.replace(old, new)
+            out_s = v.replace(old, new)
+            return out_s if out_s.strip() or not v.strip() else REMOVED  # never leave a message empty
         if isinstance(v, list):
             return [walk(x) for x in v]
         if isinstance(v, dict):

@@ -253,3 +253,19 @@ def test_replay_why(demo):
     assert "3/3  calls issue_refund" in out
     assert "run_start" in out  # why 0 reports the error and keeps the session alive
     assert "#5 tool_result" in out
+
+
+def test_bare_runtape_opens_replay(demo, monkeypatch):
+    # `runtape` with no arguments is the README's first command: it must open the replay
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    code, out = run()
+    assert code == 0 and "refund-bot  ok" in out
+
+
+def test_bad_negative_and_last_references(demo):
+    code, out = run("show", str(demo), "-999")
+    assert code == 1 and "No event #-999" in out
+    code, out = run("why", str(demo), "last", "--model-fn", SIM, "--dry")
+    assert code == 0 and "Suspects for the decision behind #35" in out  # last model reply, not run_end
+    r_out = replay(demo, "goto -999\nshow\nq\n")
+    assert "No event #-999" in r_out and "#0 run_start" in r_out  # session survives

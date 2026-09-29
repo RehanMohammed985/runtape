@@ -98,30 +98,39 @@ class Recorder:
         meta: dict | None = None,
         parent: int | None = None,
     ) -> int:
-        """Append one event. Returns its id. Never raises on bad payloads."""
+        """Append one event. Returns its id. Never raises, and ids never skip."""
+        body = to_jsonable(payload if payload is not None else {})  # outside the lock: can be slow
+        extra = to_jsonable(meta or {})
         with self._lock:
             if self._closed:
                 return -1
             eid = self._next_id
             self._next_id += 1
-            event = {
-                "id": eid,
-                "ts": time.time(),
-                "type": type,
-                "parent": parent,
-                "payload": to_jsonable(payload if payload is not None else {}),
-                "meta": to_jsonable(meta or {}),
-            }
+            event = {"id": eid, "ts": time.time(), "type": type, "parent": parent, "payload": body, "meta": extra}
             if self._redact is not None:
-                try:
-                    event = self._redact(event)
-                except Exception as e:  # a broken redactor must not kill the run
-                    event["meta"]["redact_error"] = repr(e)
-            self._fh.write(dumps(event) + "\n")
+                event = self._apply_redact(event)
+            try:
+                line = dumps(event)
+            except (TypeError, ValueError) as e:
+                line = dumps({**{k: event.get(k) for k in ("id", "ts", "type", "parent")},
+                              "payload": {"__unserializable__": str(e)}, "meta": {}})
+            self._fh.write(line + "\n")
             self._fh.flush()
             if self._fsync:
                 os.fsync(self._fh.fileno())
             return eid
+
+    def _apply_redact(self, event: dict) -> dict:
+        """Run the user's redactor. If it fails, drop the content rather than write it unredacted."""
+        fixed = {k: event[k] for k in ("id", "ts", "type", "parent")}
+        try:
+            out = self._redact(dict(event))
+            if not isinstance(out, dict):
+                raise TypeError(f"redact returned {type(out).__name__}, expected the event dict")
+            return {**fixed, "payload": to_jsonable(out.get("payload", {})), "meta": to_jsonable(out.get("meta", {}))}
+        except Exception as e:
+            return {**fixed, "payload": {"__redacted__": "redact function failed; content dropped"},
+                    "meta": {"redact_error": repr(e)}}
 
     def state(self, key: str, value: Any) -> int:
         """Record a state change: memory write, plan update, scratchpad, etc."""

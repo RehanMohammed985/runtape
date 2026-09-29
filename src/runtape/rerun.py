@@ -327,7 +327,11 @@ def load_model_fn(spec: str) -> Model:
         raise ValueError("model function must look like module:function")
     if mod_name.endswith(".py") or os.sep in mod_name:
         import importlib.util
+        import sys
 
+        folder = str(Path(mod_name).resolve().parent)
+        if folder not in sys.path:
+            sys.path.insert(0, folder)  # so the file can import its neighbors
         spec_ = importlib.util.spec_from_file_location(Path(mod_name).stem, mod_name)
         mod = importlib.util.module_from_spec(spec_)
         spec_.loader.exec_module(mod)
@@ -528,6 +532,8 @@ def edited_request(
             notes.append(f"dropped {', '.join(s.where for s in found)}")
         req = ablate(req, chosen)
     for old, new in (replace or {}).items():
+        if not old:
+            raise ValueError("replace needs non-empty text to find")
         req, n = replace_text(req, old, new)
         if n == 0:
             raise ValueError(f"'{old}' doesn't appear anywhere in the context")

@@ -13,7 +13,7 @@ several times per variant, and shows what the agent does instead.
 
 Here the agent refunded $2,400 without a manager. The cause was one sentence
 in one search result: a community forum post that had been indexed into the
-help center. Without that sentence the agent escalates, 5 out of 5 times.
+help center. Without that sentence the agent escalates, 10 out of 10 times.
 
 The cause is also **masked**. The same search result contained the real $200
 policy, so removing the whole result changes nothing. Tools that only show
@@ -65,8 +65,9 @@ def lookup_order(order_id: str):
 **Anything else:** **rec.log_llm_request(...)** and **rec.log_llm_response(...)**.
 
 Traces go to **./traces/**, one JSONL file per run, written as the run
-happens, so a crash still leaves a readable file. Sync, async and streaming
-calls are supported.
+happens, so a crash still leaves a readable file. Sync and async calls are
+recorded, including **stream=True**, Anthropic's **messages.stream()**, OpenAI's
+**.stream()** and **.parse()**, and Anthropic's beta endpoints.
 
 ## Find out why
 
@@ -83,13 +84,18 @@ What it does:
    actually makes it reliably. An unstable decision is reported as such.
 2. Splits the context into pieces: system prompt, messages, tool results.
 3. Removes each piece and reruns the decision. A quick 2-run screen, extended
-   to the full count only where something changes.
-4. Narrows every cause down through JSON items, paragraphs and sentences.
-5. Looks inside the most suspicious pieces even when removing them whole does
+   only where something changes.
+4. Confirms every candidate with more reruns on both sides and a Fisher exact
+   test, corrected for the number of pieces compared, so a model that is
+   simply random isn't reported as having a cause. The report shows the
+   evidence and the p-value.
+5. Narrows every cause down through JSON items, paragraphs and sentences.
+6. Looks inside the most suspicious pieces even when removing them whole does
    nothing, to find masked causes.
-6. If no single piece matters, searches for the smallest set that does.
-7. Reports what the agent does instead, and separates **causes** (without
-   them it acts differently) from **needed inputs** (without them it can't act).
+7. If no single piece matters, searches for the smallest set that does.
+8. Reports what the agent does instead. Pieces that only supply the data the
+   call is made with (the order it looked up) are listed separately as
+   **inputs**, apart from the **causes**.
 
 Only the single decision is rerun. Your agent and its tools never run again,
 so nothing is refunded, emailed or deleted twice.
@@ -97,7 +103,7 @@ so nothing is refunded, emailed or deleted twice.
 Options: **--runs** (reruns per variant, default 5), **--budget** (max model
 calls, default 300), **--dry** (a free ranked list of suspects, no model
 calls), **--match REGEX** (explain a text answer), **--json** (write the report).
-Replies are cached in **./.runtape/**, so running it again is free.
+Replies are cached in **./.runtape/** per model, so running it again is free.
 
 ## Test a fix before you ship it
 
@@ -134,10 +140,12 @@ with runtape.replay("traces/bad-refund.jsonl") as rp:
 ```
 
 Model replies and tool results come from the recording, so the run is free,
-offline and identical every time. Set a breakpoint anywhere in your agent. If
-your code sends a request that differs from the recording, replay stops and
-shows the first difference. With **on_diverge="live"** it switches to the real
-model from that point.
+offline and repeatable. Tool results come back as their original types
+(dataclasses, Pydantic models, tuples). Set a breakpoint anywhere in your
+agent. If your code sends a request that differs from the recording (messages,
+system prompt, tools, model or settings), replay stops and shows the first
+difference. With **on_diverge="live"** it switches to the real model from that
+point.
 
 ## Browse a run
 
@@ -175,13 +183,23 @@ receives each event as a dict before it is written.
 
 ## Limits
 
-- **why** reruns a real model, so it costs tokens. A typical run makes 50 to
-  100 calls on one context. **--dry**, **--budget** and **--max-pieces** keep
-  that in check, and results are cached.
+- **why** reruns a real model, so it costs tokens: typically 100 to 200 calls
+  on one context. **--dry**, **--budget** and **--max-pieces** keep that in
+  check, and results are cached.
+- It favors precision over sensitivity. In testing, a model that refunds at
+  random produced no false causes in 100 runs. A cause that moves the decision
+  from 90% to 10% was found 20 times out of 20. A weak one (70% to 30%) was
+  found about half the time. For noisy decisions, raise **--runs**.
+- At temperature 0 each variant is rerun twice instead of five times.
 - Removing a piece replaces it with **[content removed]**. The marker itself
   can occasionally influence a model.
+- Replay serves non-streamed calls. A streamed call counts as a divergence
+  (or goes live with **on_diverge="live"**). LangChain runs can be recorded and
+  explained, but not replayed yet.
 - Rerunning needs the model the agent used. Other providers work through
-  **--model-fn**, which takes any function from a request to a reply.
+  **--model-fn**, which takes any function from a request to a reply. With a
+  model function, text answers are compared by wording, so **--match** gives
+  sharper results there.
 
 ## License
 

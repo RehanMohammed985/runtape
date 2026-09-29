@@ -18,7 +18,7 @@ from runtape.rerun import FunctionModel  # noqa: E402
 
 
 def shot(name: str, command: str, renderable) -> None:
-    c = Console(record=True, width=118, force_terminal=True, color_system="truecolor")
+    c = Console(record=True, width=124, force_terminal=True, color_system="truecolor")
     c.print(Text("$ " + command, style="bold green"))
     c.print(renderable)
     c.save_svg(str(ROOT / "docs" / f"{name}.svg"), title=f"runtape {name}")
