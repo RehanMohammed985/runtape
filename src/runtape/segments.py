@@ -428,7 +428,14 @@ _WORD = re.compile(r"[a-z0-9$][a-z0-9$.\-]*[a-z0-9]|[a-z0-9]")
 
 
 def _tokens(text: str) -> list[str]:
-    return [w for w in _WORD.findall(text.lower()) if w not in _STOP]
+    out = []
+    for w in _WORD.findall(text.lower()):
+        if w in _STOP:
+            continue
+        if w.endswith(".0") and w[:-2].isdigit():
+            w = w[:-2]  # 64.0 and 64 are the same number
+        out.append(w)
+    return out
 
 
 def overlap(segment_text: str, decision_text: str) -> float:

@@ -689,3 +689,17 @@ def test_short_argument_values_dont_mark_inputs(tmp_path):
     rep = why(t, rid + 1, model=FunctionModel(m), cache_dir=None)
     c = [c for c in rep.causes if c.finest.removed[-1].kind == "system"][0]
     assert c.kind == "decisive"  # "1" in "Rule 1" is not the data the call was made with
+
+
+def test_exact_args_ignore_number_formatting(tmp_path):
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY])
+    tgt = make_target(t, resp, exact_args=True)  # recorded amount=900
+    assert tgt.matches(Reply(None, [{"name": "issue_refund", "arguments": {"order_id": "Z-9", "amount": "900"}}]))
+    assert tgt.matches(Reply(None, [{"name": "issue_refund", "arguments": {"order_id": "Z-9", "amount": 900.0}}]))
+    assert not tgt.matches(Reply(None, [{"name": "issue_refund", "arguments": {"order_id": "Z-9", "amount": 64}}]))
+
+
+def test_suspects_match_numbers_across_formats():
+    from runtape.segments import overlap
+
+    assert overlap('{"item": "desk lamp", "total": 64.0}', 'issue_refund {"amount": 64, "order_id": "B-2290"}') > 0

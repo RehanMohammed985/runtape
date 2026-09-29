@@ -27,6 +27,7 @@ from .rerun import (
     model_for,
     request_for,
 )
+from .recorder import _loose
 from .segments import Segment, ablate, extract, overlap
 from .trace import Trace
 
@@ -49,7 +50,7 @@ class Target:
     def matches(self, r: Reply) -> bool:
         if self.mode == "tool":
             for tc in r.tool_calls:
-                if tc.get("name") == self.tool and (self.args is None or _canon(tc.get("arguments")) == _canon(self.args)):
+                if tc.get("name") == self.tool and (self.args is None or _loose(tc.get("arguments")) == _loose(self.args)):
                     return True
             return False
         if self.mode == "tools":
@@ -480,13 +481,16 @@ class Why:
         if self.base_trial.kept == 0:
             rep.warnings.append(
                 f"The model never repeated this decision in {self.base_trial.n} reruns of the exact same context, "
-                "so there is nothing to attribute. The original was a rare outcome, or the model/settings changed."
+                "so there is nothing to attribute. The original was a rare outcome, or the model/settings changed. "
+                "To measure how rare, run: runtape odds <trace> <event> --runs 20. To test a suspect directly, "
+                "compare that with: runtape rerun <trace> <event> --drop <event> --runs 20."
             )
             return
         if self.base < 0.6:
             rep.warnings.append(
                 f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} reruns of "
-                "the same context. Causes need stronger evidence to show up; raise --runs for a clearer answer."
+                "the same context. Causes need stronger evidence to show up; raise --runs, or test a suspect "
+                "directly with runtape rerun <trace> <event> --drop <event> --runs 20."
             )
         all_segs = extract(self.req, self.trace, self.target.request_id)
         if not all_segs:
