@@ -29,12 +29,6 @@ import json
 import sys
 from pathlib import Path
 
-import anthropic
-
-try:
-    import httpx2 as hx
-except ImportError:
-    import httpx as hx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import runtape  # noqa: E402
@@ -78,6 +72,11 @@ def _script():
 
 
 def fake_backend():
+    try:  # newer anthropic SDKs use httpx2
+        import httpx2 as hx
+    except ImportError:
+        import httpx as hx
+
     queue = _script()
 
     def handler(request):
@@ -273,6 +272,8 @@ def main(trace_path=None, live=False, model=LIVE_MODEL, local=None, local_url="h
         with rec:
             run_agent_openai(rec, client, local)
         return rec.path
+    import anthropic  # only the scripted and --live modes need the Anthropic SDK
+
     if live:
         client = rec.wrap(anthropic.Anthropic())
     else:
