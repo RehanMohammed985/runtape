@@ -280,8 +280,10 @@ if __name__ == "__main__":
     ev = destructive_call(path)
     if ev is not None:
         print("The agent wiped the shared staging database. Find out why:")
-        print(f"  runtape why {path} {ev} --match 'db-reset|dropdb'"
-              + (" --model-fn examples/ops_agent.py:simulated_model" if provider == "simulated" else ""))
+        fn = " --model-fn examples/ops_agent.py:simulated_model" if provider == "simulated" else ""
+        print(f"  runtape why {path} {ev} --match 'db-reset|dropdb'" + fn)
+        print("Then check fixes and write a regression test:")
+        print(f"  runtape fix {path} {ev} --match 'db-reset|dropdb'" + fn + " --write-test tests/test_ops.py")
     else:
         print("The agent did not reset the database this time." if box.migrated else
               "The agent did not fix it this time.")

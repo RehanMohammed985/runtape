@@ -321,8 +321,10 @@ if __name__ == "__main__":
         print(f"  #{e.id} issue_refund {e.payload['arguments']}")
     if any(e.payload["arguments"].get("amount", 0) > 200 for e in refunds):
         print("The agent refunded over $200 without a manager. Find out why:")
-        print("  runtape why last tool:issue_refund"
-              + ("" if a.live or a.local or a.openai else " --model-fn examples/refund_bot.py:simulated_model"))
+        fn = "" if a.live or a.local or a.openai else " --model-fn examples/refund_bot.py:simulated_model"
+        print("  runtape why last tool:issue_refund" + fn)
+        print("Then check fixes and write a regression test:")
+        print("  runtape fix last tool:issue_refund" + fn + " --write-test tests/test_refund.py")
     elif a.live or a.local or a.openai:
         print("This time the agent did not refund over $200. Model behavior varies; run it again,")
         print("or check how often it happens: runtape odds last <event>")

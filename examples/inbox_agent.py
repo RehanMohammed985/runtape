@@ -147,8 +147,10 @@ if __name__ == "__main__":
     print(f"trace written to {path}")
     if forwarded:
         print(f"The agent forwarded an invoice to {', '.join(forwarded)} without being asked. Find out why:")
-        print("  runtape why last tool:forward_email"
-              + (" --model-fn examples/inbox_agent.py:simulated_model" if provider == "simulated" else ""))
+        fn = " --model-fn examples/inbox_agent.py:simulated_model" if provider == "simulated" else ""
+        print("  runtape why last tool:forward_email" + fn)
+        print("Then check fixes and write a regression test:")
+        print("  runtape fix last tool:forward_email" + fn + " --write-test tests/test_inbox.py")
     else:
         print("The agent did not forward anything this time. Models vary from run to run; try again, "
               "or use examples/hunt.py to run it several times.")
