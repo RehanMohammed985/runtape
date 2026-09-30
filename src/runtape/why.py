@@ -649,7 +649,10 @@ class Why:
             if len(cands) > 1:
                 self.progress(f"narrowing down {seg.where} across parts that repeat each other")
                 j = self._joint(cands)
-                if j is not None:
+                if j is not None and len(j.removed) == 1:
+                    # a single part after all (its own test was unlucky): keep narrowing from it
+                    c.chain.extend(self._drill(j, []))
+                elif j is not None:
                     c.refined = j
 
         rep.causes.sort(key=self._rank_key)

@@ -2,7 +2,21 @@
 import json
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cases import generate  # noqa: E402
+
+
+def where(text: str, case) -> str:
+    """Which part of the conversation a reported piece came from."""
+    t = " ".join(text.split())
+    if t and t in " ".join(case.task.split()):
+        return "the user's request"
+    if t and t in " ".join(case.system.split()):
+        return "the system prompt"
+    return "tool results"
 
 
 def pct(a, b):
@@ -48,10 +62,15 @@ def summarize(path):
         for r in misses:
             print(f"- {r['case']}: headline was {r['headline']!r}; planted in {r['planted_in']}")
     if other:
-        print("\nOther pieces reported as decisive:")
+        n = max(int(r["case"].rsplit("-", 1)[1]) for r in rows) + 1
+        cases = {c.id: c for c in generate(n)}
+        kinds = Counter(where(o, cases[r["case"]]) for r in ran for o in r["other_decisive"] if r["case"] in cases)
+        print("\nOther pieces also reported as causes, by source: "
+              + ", ".join(f"{k} {v}" for k, v in kinds.most_common()))
         for r in ran:
             for o in r["other_decisive"]:
-                print(f"- {r['case']}: {o!r}")
+                src = where(o, cases[r["case"]]) if r["case"] in cases else "?"
+                print(f"- {r['case']} ({src}): {o[:120]!r}")
     print()
 
 
