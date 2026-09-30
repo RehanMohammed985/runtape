@@ -5,7 +5,7 @@ from .rerun import Distribution, Reply, rerun
 from .why import why
 from .replay import ReplayDiverged, Replayer, replay
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def record(path=None, **kwargs) -> Recorder:
