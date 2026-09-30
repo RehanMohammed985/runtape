@@ -414,6 +414,8 @@ class Why:
         self._decision = target.decision_text()
         self.base_trial = Trial([])
         self._earlier = None
+        self._turn_tools: set | None = None
+        self._targets: list = []
         self.tested = 0  # every removal compared so far; confirmations correct for all of them
 
     # -- running trials
@@ -516,7 +518,25 @@ class Why:
                              for e in self.trace.events if e.type == "tool_call" and e.id < self.target.request_id}
         if all((tc.get("name"), _canon(_loose(tc.get("arguments")))) in self._earlier for tc in reply.tool_calls):
             return 2
+        if all(self._looks_up_target(tc) for tc in reply.tool_calls):
+            return 2
         return 0
+
+    def _looks_up_target(self, tc: dict) -> bool:
+        """Is this call a step back to gather information about the very thing the decision acts on?
+        E.g. without the disk usage listing, the agent runs `du -sh /srv/backups` before deleting it: the
+        same plan with one more lookup, not a different decision. Counted as such when the call uses a
+        tool the agent already used earlier in this turn (a lookup tool here), is not the decision's own
+        tool (running `make migrate` instead of `make db-reset` IS a different decision), and its
+        arguments mention a distinctive argument of the decision (the path, the order, the address)."""
+        if self._turn_tools is None:
+            self._turn_tools = _turn_tools(self.req)
+            self._targets = _arg_values(self.target)
+        name = tc.get("name")
+        if name not in self._turn_tools or name in {c.get("name") for c in self.target.recorded.tool_calls}:
+            return False
+        args = _canon(tc.get("arguments")).lower()
+        return any(v in args for v in self._targets)
 
     def _rank_key(self, c: Cause) -> tuple:
         t = c.refined or c.finest
@@ -757,6 +777,30 @@ class Why:
         return test(cur)
 
 
+def _turn_tools(req: dict) -> set:
+    """Names of the tools the agent called since the user's latest message, from the request."""
+    msgs = req.get("messages") or []
+    start = 0
+    for i, m in enumerate(msgs):
+        if not isinstance(m, dict) or m.get("role") not in ("user", "human"):
+            continue
+        c = m.get("content")
+        is_result = isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
+        if not is_result:
+            start = i
+    names = set()
+    for m in msgs[start:]:
+        if not isinstance(m, dict):
+            continue
+        for tc in m.get("tool_calls") or []:
+            names.add((tc.get("function") or {}).get("name") or tc.get("name"))
+        c = m.get("content")
+        if isinstance(c, list):
+            names.update(b.get("name") for b in c if isinstance(b, dict) and b.get("type") == "tool_use")
+    names.discard(None)
+    return names
+
+
 def _arg_values(target: Target) -> list[str]:
     """Lowercased argument values of the recorded call(s), as they'd appear in text."""
     out: list[str] = []
@@ -779,7 +823,8 @@ def _arg_values(target: Target) -> list[str]:
                 add(x)
 
     for tc in target.recorded.tool_calls:
-        if target.mode == "tools" or tc.get("name") == target.tool:
+        if target.mode in ("tools", "judge") or tc.get("name") == target.tool or \
+                (target.mode == "match" and tc is target._matched_call()):
             add(tc.get("arguments"))
     return out
 
