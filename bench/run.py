@@ -135,6 +135,9 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=4, help="parallel requests (always 1 for a local model)")
     ap.add_argument("--out", help="results file (default bench/results/<model>.jsonl)")
     ap.add_argument("--work", help="folder for traces and the reply cache (default bench/)")
+    ap.add_argument("--rescore", action="store_true",
+                    help="score every case again with the current code (the old results are kept as .old); "
+                         "saved replies are reused, so only new steps call the model")
     a = ap.parse_args(argv)
 
     if a.local:
@@ -149,6 +152,8 @@ def main(argv=None):
     out = Path(a.out or HERE / "results" / f"{label}.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
     done = set()
+    if a.rescore and out.exists():
+        out.replace(out.with_suffix(".old.jsonl"))
     if out.exists():
         done = {json.loads(line)["case"] for line in out.read_text().splitlines() if line.strip()}
     work = Path(a.work) if a.work else HERE

@@ -105,8 +105,10 @@ class Reply:
                     a = json.dumps(args, ensure_ascii=False) if args is not None else ""
                 parts.append(f"{tc.get('name')}({a})")
             s = "calls " + ", ".join(parts)
+        elif (self.text or "").strip():
+            s = "replies: " + " ".join(self.text.split())
         else:
-            s = "replies: " + " ".join((self.text or "").split())
+            s = "stops with an empty reply"
         return s if len(s) <= limit else s[: limit - 3] + "..."
 
     def to_dict(self) -> dict:
