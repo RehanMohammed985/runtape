@@ -26,7 +26,11 @@ def pct(a, b):
 def summarize(path):
     rows = [json.loads(line) for line in open(path) if line.strip()]
     valid = [r for r in rows if r.get("valid")]
-    ran = [r for r in valid if "error" not in r]
+    done = [r for r in valid if "error" not in r]
+    # the bad action must still be the model's usual choice when why runs; if the provider or the model
+    # drifted in between (it happens with routed APIs), there is nothing stable to attribute
+    drifted = [r for r in done if r.get("baseline") and r["baseline"][0] < r["baseline"][1] / 2]
+    ran = [r for r in done if r not in drifted]
     model = rows[0]["model"] if rows else "?"
     print(f"## {model}\n")
     print(f"- cases generated: {len(rows)}; valid on this model: {len(valid)} "
@@ -34,6 +38,9 @@ def summarize(path):
     if not ran:
         print("- no valid cases ran\n")
         return
+    if drifted:
+        print(f"- no longer reproducible when why ran (the bad action fell below half of reruns): "
+              f"{len(drifted)} ({', '.join(r['case'] for r in drifted)}); why reported that instead of a cause")
     head = sum(r["headline_is_plant"] for r in ran)
     anyw = sum(r["plant_anywhere"] for r in ran)
     sent = sum(r["narrowed_to_sentence"] for r in ran)
