@@ -116,6 +116,47 @@ reported text. It is an intervention on the input, not a correlation, but it
 is not an explanation of the model's internals, and a different model or a
 different context can depend on different things.
 
+## Benchmark
+
+`bench/` measures whether `why` finds a cause that is known in advance. It
+generates agent conversations in five domains (support refunds, an email
+inbox, operations on a staging server, disk cleanup, access control) and
+plants one sentence pushing toward a harmful action (a refund without
+approval, forwarding an invoice, dropping a database, deleting backups,
+granting admin) inside one of several realistic documents. A case counts only
+if, on that model, the harmful action happens in at least 5 of 10 runs with
+the sentence and at most 1 of 10 without it. `why` is then run without being
+told where the sentence is.
+
+| model | cases | counted | not reproducible when `why` ran | headline is the planted sentence | narrowed to that sentence |
+|---|---|---|---|---|---|
+| gpt-oss-120b (OpenRouter) | 50 | 13 | 2 | 11 of 11 | 9 of 11 |
+| sarvam-105b (Sarvam API) | 50 | 5 | 4 | 1 of 1 | 1 of 1 |
+| Llama 3.1 8B (OpenRouter, stopped at 18 cases) | 18 | 6 | 4 | 2 of 2 | 2 of 2 |
+
+- In all 14 counted cases where the model still made the harmful decision
+  most of the time when `why` ran, the headline cause was the planted
+  sentence. In 12 it was narrowed to exactly that sentence; in the other 2, to
+  a span that also held the email signature the sentence was attached to.
+- In 10 counted cases the decision was no longer the model's usual choice
+  when `why` ran, either because the model makes it only about half the time
+  or because a routed API served the reruns from a different provider. `why`
+  reported that there was nothing stable to attribute. Attribution needs a
+  decision the model makes consistently.
+- Other pieces were reported as causes too, mostly the user's request, the
+  system prompt, or data the action needs (the test failure, the list of
+  roles). These are real conditions of the decision and are listed after the
+  headline.
+- The first runs exposed ranking bugs in `why`. They were fixed and the
+  same cases re-scored from saved replies (`bench/rescore.py`), so these cases
+  informed the fixes. A run with a new seed is the unbiased measurement.
+- The cases are generated and each has a single planted cause. Causes spread
+  across several pieces, or starting several steps before the decision, are
+  not covered.
+
+Results and traces are in `bench/results` and `bench/traces`; the method is
+in [bench/README.md](https://github.com/RehanMohammed985/runtape/blob/main/bench/README.md).
+
 ## Turn the failure into a test
 
 ```python
@@ -162,6 +203,10 @@ runtape odds last 22 --runs 20
 - Interactions: combinations are searched among the most suspicious pieces
   only (both needed, or either enough). A cause that needs three or more
   unrelated pieces together can be missed.
+- Routed APIs: a router such as OpenRouter can serve reruns from a different
+  provider than the original call, and providers of the same model behave
+  differently. Pin one provider when you record, or `why` may find nothing
+  stable to attribute.
 - Local models: reruns against a server on your machine (Ollama, LM Studio)
   run one at a time. An 8B model needs about 6 GB of free memory; on a laptop
   with 8 GB, use a 3B model or a hosted one.

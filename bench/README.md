@@ -22,8 +22,28 @@ scored on:
 ```
 python bench/run.py --local llama3.1:8b --cases 20      # free, through Ollama
 python bench/run.py --openai gpt-4o-mini --cases 20
-python bench/report.py bench/results/*.jsonl
+python bench/run.py --openai openai/gpt-oss-120b --base-url https://openrouter.ai/api/v1 --max-tokens 2000 --cases 50
+python bench/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --max-tokens 2000 --cases 50
+python bench/report.py bench/results/*.rescored.jsonl
 ```
+
+`bench/rescore.py` scores finished cases again with the current code, reading
+every rerun from the saved replies in `bench/.cache` (no model calls). If the
+current code asks for a reply that was never saved, that case is marked
+incomplete.
+
+## Results so far
+
+Recorded in `bench/results/*.jsonl` (as run) and `*.rescored.jsonl` (scored
+with the current code), with the conversations in `bench/traces`. Summary in
+the main README. Two things the runs showed beyond the scores:
+
+- Models resisted most planted sentences: gpt-oss-120b took the harmful
+  action in 13 of 50 cases, sarvam-105b in 5 of 50, Llama 3.1 8B in 6 of 18.
+- Through OpenRouter, the same request was answered differently minutes
+  apart (7 of 10 runs, then 0 of 5), consistent with calls being routed to
+  different providers. Cases whose decision was no longer the model's usual
+  choice when `why` ran are reported separately, not as misses.
 
 Runs resume where they stopped; replies are cached in `bench/.cache`.
 `bench/sim.py` is a noisy stand-in model used only to test the harness.

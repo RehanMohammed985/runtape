@@ -1,10 +1,17 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
-traces/
+/traces/
+examples/traces/
 dist/
 .runtape/
 
 bench/.cache/
-bench/traces/
+bench/traces/*
+!bench/traces/openai_gpt-oss-120b/
+!bench/traces/sarvam-105b/
+!bench/traces/meta-llama_llama-3.1-8b-instruct/
+bench/*.tgz
+bench/results/*.errors.log
+bench/results/*.old.jsonl
 bench/results/sim.jsonl
