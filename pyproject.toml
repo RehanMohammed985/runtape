@@ -34,6 +34,9 @@ Issues = "https://github.com/RehanMohammed985/runtape/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/runtape"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["bench/traces", "bench/results", "docs/*.gif", "docs/*.svg"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
