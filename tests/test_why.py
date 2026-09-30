@@ -790,3 +790,12 @@ def test_recheck_out_of_budget_is_a_warning_not_a_stop(tmp_path):
     assert rep.stopped is None
     assert any("rechecked with a different replacement" in w for w in rep.warnings)
     assert [c for c in rep.causes if c.kind == "decisive"]
+
+
+def test_local_model_servers_get_one_request_at_a_time():
+    from runtape.rerun import OpenAIChatModel, safe_workers
+
+    assert safe_workers(OpenAIChatModel(endpoint="http://localhost:11434/v1"), 8) == 1
+    assert safe_workers(OpenAIChatModel(endpoint="http://127.0.0.1:1234/v1"), 8) == 1
+    assert safe_workers(OpenAIChatModel(), 8) == 8
+    assert safe_workers(FunctionModel(lambda r: {"text": "x"}), 8) == 8

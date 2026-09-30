@@ -19,6 +19,7 @@ from typing import Callable
 
 from .rerun import (
     BudgetExceeded,
+    safe_workers,
     Model,
     Reply,
     Sampler,
@@ -816,7 +817,9 @@ def why(
         trace = Trace.load(trace)
     rid, _ = request_for(trace, event_id)
     req = build_request(trace, rid)
-    sampler = Sampler(model or model_for(req), cache_dir=cache_dir, budget=budget, workers=workers, on_call=on_call)
+    model = model or model_for(req)
+    sampler = Sampler(model, cache_dir=cache_dir, budget=budget, workers=safe_workers(model, workers),
+                      on_call=on_call)
     target = make_target(trace, event_id, tool=tool, match=match, exact_args=exact_args)
     notes = []
     if target.mode == "judge":

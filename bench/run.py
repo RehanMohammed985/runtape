@@ -33,7 +33,7 @@ sys.path.insert(0, str(HERE))
 import runtape  # noqa: E402
 from cases import generate  # noqa: E402
 from runtape.rerun import (BudgetExceeded, Sampler, build_request, load_model_fn, model_for,  # noqa: E402
-                           openai_to_anthropic)
+                           openai_to_anthropic, safe_workers)
 from runtape.segments import replace_text  # noqa: E402
 
 
@@ -128,7 +128,7 @@ def main(argv=None):
     ap.add_argument("--k", type=int, default=10, help="samples with and without the plant to validate a case")
     ap.add_argument("--budget", type=int, default=300, help="max model calls for each why run")
     ap.add_argument("--max-tokens", type=int, default=400)
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=4, help="parallel requests (always 1 for a local model)")
     ap.add_argument("--out", help="results file (default bench/results/<model>.jsonl)")
     ap.add_argument("--work", help="folder for traces and the reply cache (default bench/)")
     a = ap.parse_args(argv)
@@ -164,7 +164,7 @@ def main(argv=None):
         mdl = fn_model or model_for(req)
         pat = re.compile(case.bad, re.I)
         # validation samples use their own cache, apart from why's reruns
-        val = Sampler(mdl, cache_dir=cache / "validate", budget=None, workers=a.workers)
+        val = Sampler(mdl, cache_dir=cache / "validate", budget=None, workers=safe_workers(mdl, a.workers))
         with_p = val.samples(req, a.k)
         without = val.samples(without_plant(req, case.plant), a.k)
         p1 = sum(bad_call(r, pat) for r in with_p)

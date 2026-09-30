@@ -162,6 +162,9 @@ runtape odds last 22 --runs 20
 - Interactions: combinations are searched among the most suspicious pieces
   only (both needed, or either enough). A cause that needs three or more
   unrelated pieces together can be missed.
+- Local models: reruns against a server on your machine (Ollama, LM Studio)
+  run one at a time. An 8B model needs about 6 GB of free memory; on a laptop
+  with 8 GB, use a 3B model or a hosted one.
 - Replacement text: sentences, paragraphs and JSON items are cut out. A whole
   message or tool result is replaced with `[content removed]` (set with
   `--fill`), which can itself affect the model; step 8 checks for that.

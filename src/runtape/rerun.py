@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -385,6 +386,16 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+def safe_workers(model, workers: int) -> int:
+    """One request at a time for a model on this machine. A local server (Ollama, LM Studio) keeps a
+    separate context in memory for each parallel request, which can exhaust a laptop's memory."""
+    ep = getattr(model, "endpoint", None) or ""
+    host = re.sub(r"^\w+://", "", ep).split("/")[0].rsplit(":", 1)[0].strip("[]")
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local"):
+        return 1
+    return workers
+
+
 class Sampler:
     """Sends requests through a model with caching, a call budget and parallelism.
 
@@ -600,7 +611,7 @@ def rerun(
         model = model_for(req)
     elif not isinstance(model, (AnthropicModel, OpenAIChatModel, OpenAIResponsesModel, FunctionModel)):
         model = FunctionModel(model)
-    sampler = Sampler(model, cache_dir=cache_dir, budget=budget, workers=workers)
+    sampler = Sampler(model, cache_dir=cache_dir, budget=budget, workers=safe_workers(model, workers))
     if runs < 1:
         raise ValueError("runs must be at least 1")
     k = min(runs, 2) if is_deterministic(req) else runs
