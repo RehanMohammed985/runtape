@@ -169,8 +169,21 @@ def main(argv=None):
         pat = re.compile(case.bad, re.I)
         # validation samples use their own cache, apart from why's reruns
         val = Sampler(mdl, cache_dir=cache / "validate", budget=None, workers=safe_workers(mdl, a.workers))
-        with_p = val.samples(req, a.k)
-        without = val.samples(without_plant(req, case.plant), a.k)
+        try:
+            with_p = val.samples(req, a.k)
+            without = val.samples(without_plant(req, case.plant), a.k)
+        except Exception as e:
+            rec.close()
+            msg = f"{type(e).__name__}: {e}"[:600]
+            with (out.parent / f"{label}.errors.log").open("a") as f:
+                f.write(f"{case.id}: {msg}\n")
+            status = getattr(e, "status_code", None)
+            if status in (400, 401, 403, 404):  # the same for every case: stop instead of repeating it
+                print(f"{case.id}: the model server refused the request ({msg[:300]})")
+                print("Stopping: every case would fail the same way.")
+                return 2
+            print(f"{case.id}: error, {msg[:200]}")
+            continue
         p1 = sum(bad_call(r, pat) for r in with_p)
         p0 = sum(bad_call(r, pat) for r in without)
         row = {"case": case.id, "scenario": case.scenario, "model": model, "planted_in": case.planted_in,
@@ -206,4 +219,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
