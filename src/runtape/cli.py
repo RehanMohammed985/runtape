@@ -203,6 +203,57 @@ def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replac
     return 0
 
 
+def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=None, model_fn=None, budget=600,
+            cache=True, yes=False, write_test=None, fill=None) -> int:
+    from .fix import fix, write_test as _write
+
+    model = _model(model_fn)
+    if model is None and not yes and sys.stdin.isatty():
+        from .why import estimate_calls
+
+        likely, _ = estimate_calls(trace, event)
+        c.print(Text(f"This finds the cause (about {likely} model calls) and then checks up to 4 fixes with "
+                     f"{runs} reruns each. Replies are cached.", style="dim"))
+        if input("Continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            return 1
+    counter = {"n": 0}
+    with c.status("starting") as status:
+        def progress(msg: str) -> None:
+            status.update(f"{msg}  ({counter['n']} model calls)")
+
+        def on_call() -> None:
+            counter["n"] += 1
+
+        fr = fix(trace, event, model=model, runs=runs, budget=budget, cache_dir=".runtape/cache" if cache else None,
+                 progress=progress, tool=tool, match=match, fill=fill, on_call=on_call)
+    c.print(render.show_fix(fr))
+    best = fr.best
+    if write_test:
+        if best is None:
+            c.print(Text("No verified fix, so no test was written.", style="yellow"))
+            return 1
+        path = _write(trace.path, event, fr.report.target, write_test, add_system=best.add_system, runs=runs,
+                      model_fn=model_fn, note=f"Fix checked by runtape fix: {best.name}, "
+                                            f"{fr.report.target.describe()} in {best.kept}/{best.n} reruns "
+                                            f"(was {fr.report.baseline.kept}/{fr.report.baseline.n}).")
+        c.print(Text(f"Regression test written to {path}. Run it with: pytest {path}", style="bold"))
+    elif best is not None and best.add_system:
+        c.print(Text(f"Turn it into a test: runtape fix {trace.path} {event} --write-test tests/test_agent_regression.py",
+                     style="dim"))
+    return 0
+
+
+def run_test(c: Console, trace: Trace, event: int, *, out, tool=None, match=None, add_system=None, runs=10,
+             model_fn=None) -> int:
+    from .fix import write_test as _write
+    from .why import make_target
+
+    target = make_target(trace, event, tool=tool, match=match)
+    path = _write(trace.path, event, target, out, add_system=add_system, runs=runs, model_fn=model_fn)
+    c.print(Text(f"Regression test written to {path}. Run it with: pytest {path}", style="bold"))
+    return 0
+
+
 # ------------------------------------------------------------ interactive
 
 
@@ -591,6 +642,30 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", dest="model_name", help="rerun on a different model")
     s.add_argument("--fill", help='text that replaces a removed message or tool result: "marker" ([content removed], default), "empty" ((empty)), or any text')
 
+    s = sub.add_parser("fix", help="find the cause, then check candidate fixes on the recorded context")
+    s.add_argument("trace", help="trace file, part of its name, or 'last'")
+    s.add_argument("event", help="the decision: " + ref_help)
+    s.add_argument("--runs", type=int, default=10, help="reruns per fix (default 10)")
+    s.add_argument("--model-fn", help="use a Python function instead of the live API: module:function or file.py:function")
+    s.add_argument("--no-cache", action="store_true", help="don't reuse cached model replies")
+    s.add_argument("--tool", help="the decision is whether this tool gets called")
+    s.add_argument("--match", help="the decision is a reply matching this regex")
+    s.add_argument("--budget", type=int, default=600, help="max model calls (default 600)")
+    s.add_argument("--fill", help="replacement text for removed content (see runtape why --help)")
+    s.add_argument("--write-test", metavar="PATH", help="write a pytest regression test using the best verified fix")
+    s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
+
+    s = sub.add_parser("test", help="write a pytest regression test for a recorded decision")
+    s.add_argument("trace", help="trace file, part of its name, or 'last'")
+    s.add_argument("event", help="the decision: " + ref_help)
+    s.add_argument("--out", default="tests/test_agent_regression.py", help="where to write the test")
+    s.add_argument("--add-system", help="text to add to the system prompt (a fix) in the test")
+    s.add_argument("--add-system-file", help="the same, read from a file")
+    s.add_argument("--tool", help="the decision is whether this tool gets called")
+    s.add_argument("--match", help="the decision is a reply matching this regex")
+    s.add_argument("--runs", type=int, default=10, help="reruns in the test (default 10)")
+    s.add_argument("--model-fn", help="a Python model function for the test to use instead of the live API")
+
     s = sub.add_parser("odds", help="how often the model repeats a decision on the same context")
     s.add_argument("trace", help="trace file, part of its name, or 'last'")
     s.add_argument("event", help=ref_help)
@@ -603,7 +678,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-_COMMANDS = {"replay", "ls", "summary", "timeline", "show", "context", "grep", "diff", "why", "rerun", "odds", "mcp"}
+_COMMANDS = {"replay", "ls", "summary", "timeline", "show", "context", "grep", "diff", "why", "rerun", "odds", "mcp",
+             "fix", "test"}
 
 
 def main(argv: list[str] | None = None, console: Console | None = None) -> int:
@@ -674,6 +750,14 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
                              model_fn=args.model_fn, cache=not args.no_cache, fill=args.fill)
+        elif cmd_name == "fix":
+            return run_fix(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
+                           match=args.match, model_fn=args.model_fn, budget=args.budget, cache=not args.no_cache,
+                           yes=args.yes, write_test=args.write_test, fill=args.fill)
+        elif cmd_name == "test":
+            add = Path(args.add_system_file).read_text() if args.add_system_file else args.add_system
+            return run_test(c, trace, resolve_decision(trace, args.event), out=args.out, tool=args.tool,
+                            match=args.match, add_system=add, runs=args.runs, model_fn=args.model_fn)
         elif cmd_name == "odds":
             ev = resolve_decision(trace, args.event)
             from .rerun import request_for as _rf

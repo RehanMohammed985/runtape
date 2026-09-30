@@ -40,4 +40,7 @@ jobs:
           python $GITHUB_WORKSPACE/examples/ops_agent.py
           runtape why last 15 --match 'db-reset|dropdb' --model-fn $GITHUB_WORKSPACE/examples/ops_agent.py:simulated_model | tee why3.txt
           grep -q "CAUSE  #12 read_file result para 8" why3.txt
+          runtape fix last 15 --match 'db-reset|dropdb' --model-fn $GITHUB_WORKSPACE/examples/ops_agent.py:simulated_model -y --write-test tests/test_ops.py | tee fix.txt
+          grep -q "PASS  action guard" fix.txt
+          test -f tests/test_ops.py
           runtape summary

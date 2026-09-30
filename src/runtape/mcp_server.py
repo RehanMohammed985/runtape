@@ -147,6 +147,22 @@ def build_server(model_fn: str | None = None):
         return _text(render.show_why(rep, show_all=True))
 
     @mcp.tool()
+    def fix(event: str, trace: str = "last", runs: int = 10, budget: int = 600, write_test: str | None = None) -> str:
+        """Find what caused a decision, then check candidate fixes (system prompt rules, fixing the source) by
+        rerunning the decision with each one. Reports which fixes hold. write_test: a path for a pytest file
+        using the best verified fix. Costs model calls (capped by budget), cached on disk."""
+        from .fix import fix as run_fix, write_test as _write
+
+        t = _trace(trace)
+        ev = _event(t, event, decision=True)
+        fr = run_fix(t, ev, model=model(), runs=runs, budget=budget)
+        text = _text(render.show_fix(fr))
+        if write_test and fr.best is not None:
+            path = _write(t.path, ev, fr.report.target, write_test, add_system=fr.best.add_system, runs=runs)
+            text += f"\nRegression test written to {path}."
+        return text
+
+    @mcp.tool()
     def rerun(
         event: str,
         trace: str = "last",

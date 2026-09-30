@@ -73,6 +73,25 @@ In Python, `runtape.rerun(trace, event, drop=..., replace=..., system=...,
 model_name=..., runs=...)` returns a distribution with `never_calls(tool)`,
 `always_calls(tool)`, `rate(tool)` and `counts()`.
 
+## runtape fix and runtape test
+
+```
+runtape fix <trace> <event> [--runs 10] [--write-test PATH] [--match REGEX] [--tool NAME] [--budget 600]
+runtape test <trace> <event> [--out PATH] [--add-system TEXT | --add-system-file F] [--runs 10]
+```
+
+`fix` runs `why`, then checks each candidate fix with `--runs` reruns of the
+recorded decision: a rule that tool results are data, a rule that the call
+needs the user's own request, both, and removing the cause at its source.
+`--write-test` writes a pytest file for the best passing fix and copies the
+trace next to it under `traces/`. `test` writes the same file for a fix you
+pass yourself, or with no fix (a test that fails until the agent changes).
+
+In Python: `runtape.fix(trace, event, model=..., runs=10)` returns a report with
+`candidates` (each with `kept`, `n`, `p` and `holds()`) and `best`;
+`runtape.write_test(trace_path, event, target, out, add_system=...)` writes the
+test.
+
 ## Replay a whole run
 
 ```python

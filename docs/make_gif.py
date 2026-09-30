@@ -21,6 +21,7 @@ import runtape  # noqa: E402
 from inbox_agent import main, simulated_model  # noqa: E402
 from runtape import render  # noqa: E402
 from runtape.cli import resolve_event  # noqa: E402
+from runtape.fix import fix, write_test  # noqa: E402
 from runtape.rerun import FunctionModel  # noqa: E402
 
 WIDTH = 104
@@ -67,42 +68,43 @@ def frames():
     report = render.show_why(rep)
     out.append((head + [report], 7000))
 
-    # third beat: the failure as a regression test, run for real with pytest
-    decision = rep.target.response_id
-    test_src = TEST.format(decision=decision)
-    pytest_out = run_test(Path(path), test_src)
-    cmd3 = "cat tests/test_inbox.py"
-    screen = [prompt(cmd3)] + [Text(line, style="cyan") for line in test_src.rstrip().split("\n")]
-    for i in range(0, len(cmd3) + 1, 4):
-        out.append(([prompt(cmd3[:i], cursor=True)], 45))
-    out.append((screen, 2200))
-    cmd4 = "pytest -q tests/test_inbox.py"
+    # third beat: check fixes on the recorded context and write the test for the one that holds
+    ev = resolve_event(t, "tool:forward_email")
+    fr = fix(t, ev, model=FunctionModel(simulated_model), cache_dir=None)
+    work = Path(tempfile.mkdtemp())
+    test_path = write_test(path, ev, fr.report.target, work / "tests" / "test_inbox.py", add_system=fr.best.add_system)
+    cmd3 = "runtape fix last tool:forward_email --write-test tests/test_inbox.py"
+    for i in range(0, len(cmd3) + 1, 5):
+        out.append(([prompt(cmd3[:i], cursor=True)], 40))
+    head3 = [prompt(cmd3)]
+    for step in ("finding the cause", "checking 4 fixes"):
+        out.append((head3 + [Text("⠋ " + step, style="dim")], 500))
+    written = Text("Regression test written to tests/test_inbox.py", style="bold")
+    out.append((head3 + [render.show_fix(fr), written], 7000))
+
+    # fourth beat: the generated test, run for real with pytest
+    src = test_path.read_text().rstrip().split("\n")
+    shown = src[src.index(next(line for line in src if line.startswith("def test_"))):]
+    cmd4 = "tail -3 tests/test_inbox.py"
     for i in range(0, len(cmd4) + 1, 4):
-        out.append((screen + [Text(""), prompt(cmd4[:i], cursor=True)], 45))
-    res = [Text(line, style="bold red" if ("FAILED" in line or "Error" in line or "failed" in line) else "")
-           for line in pytest_out]
-    out.append((screen + [Text(""), prompt(cmd4)] + res, 5000))
+        out.append(([prompt(cmd4[:i], cursor=True)], 45))
+    screen = [prompt(cmd4)] + [Text(line, style="cyan") for line in shown]
+    out.append((screen, 1800))
+    cmd5 = "pytest -q tests/test_inbox.py"
+    for i in range(0, len(cmd5) + 1, 4):
+        out.append((screen + [Text(""), prompt(cmd5[:i], cursor=True)], 45))
+    res = [Text(line, style="bold green" if "passed" in line else ("bold red" if "fail" in line.lower() else ""))
+           for line in run_test(work)]
+    out.append((screen + [Text(""), prompt(cmd5)] + res, 5000))
     return out
 
 
-TEST = """import runtape
-
-def test_injected_email_is_not_forwarded():
-    runtape.rerun("traces/inbox.jsonl", {decision}, runs=10).never_calls("forward_email")
-"""
-
-
-def run_test(trace: Path, test_src: str) -> list[str]:
-    """Run the test for real. The offline demo has no live model, so conftest points reruns at the
-    same stand-in model the demo used."""
-    import shutil
+def run_test(work: Path) -> list[str]:
+    """Run the generated test for real. The offline demo has no live model, so conftest points reruns at
+    the same stand-in model the demo used."""
+    import re
     import subprocess
 
-    work = Path(tempfile.mkdtemp())
-    (work / "traces").mkdir()
-    (work / "tests").mkdir()
-    shutil.copy(trace, work / "traces" / "inbox.jsonl")
-    (work / "tests" / "test_inbox.py").write_text(test_src)
     (work / "conftest.py").write_text(
         "import sys\n"
         f"sys.path[:0] = [{str(ROOT / 'src')!r}, {str(ROOT / 'examples')!r}]\n"
@@ -113,9 +115,7 @@ def run_test(trace: Path, test_src: str) -> list[str]:
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--no-header",
                         "tests/test_inbox.py"], cwd=work, capture_output=True, text=True)
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    keep = [ln for ln in lines if ln.startswith(("F", "E ", "FAILED")) or " failed" in ln or " passed" in ln]
-    import re
-
+    keep = [ln for ln in lines if ln.startswith(("F", "E ", "FAILED", ".")) or " failed" in ln or " passed" in ln]
     return [re.sub(r" in \d+\.\d+s", "", ln)[:100] for ln in keep][:6]
 
 

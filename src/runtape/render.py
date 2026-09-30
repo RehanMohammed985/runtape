@@ -694,3 +694,59 @@ def show_distribution(dist, recorded, *, title: str) -> RenderableType:
             row.append("  (same as recorded)", style="dim")
         out.append(row)
     return Group(*out)
+
+
+def show_fix(fr) -> RenderableType:
+    """The fixes runtape tried for a decision, and how each did on the recorded context."""
+    rep = fr.report
+    tgt = rep.target
+    b = rep.baseline
+    out: list[RenderableType] = []
+    head = Text("Fixes for: the agent would ", style="bold")
+    head.append(tgt.question(), style="bold yellow")
+    out.append(head)
+    out.append(Text(f"Without a fix it does this in {_ratio(b.kept, b.n)} reruns of the recorded context.", style="dim"))
+    if fr.cause is not None:
+        t = fr.cause.refined or fr.cause.finest
+        c = Text("Cause: ", style="bold")
+        c.append(" + ".join(s.where for s in t.removed), style="bold red")
+        out.append(c)
+        out.append(Text("  " + clip('"' + " ".join(" ".join(s.text.split()) for s in t.removed) + '"', 300)))
+    if b.kept == 0:
+        out.append(Text("The model doesn't repeat this decision, so there is nothing to fix or measure.", style="yellow"))
+        return Group(*out)
+    if not fr.candidates:
+        out.append(Text("No cause was found to base a fix on. Test a change directly with runtape rerun.", style="yellow"))
+        return Group(*out)
+    out.append(Rule(style="dim"))
+    goal = fr.without_cause()
+    if goal:
+        out.append(Text(f"Without the cause, the agent instead {clip(goal, 150)}", style="dim"))
+    for c in fr.candidates:
+        ok = c.holds()
+        row = Text("  PASS  " if ok else "  FAIL  ", style="bold green" if ok else "bold red")
+        row.append(f"{c.name:<18}", style="bold")
+        row.append(f"{tgt.describe()} in {_ratio(c.kept, c.n)} reruns")
+        if c.p is not None and ok:
+            row.append(f"  (p = {_p(c.p)})", style="dim")
+        top = c.instead.most_common(1)
+        if top and goal and top[0][0] == goal:
+            row.append("  same as without the cause", style="dim")
+        out.append(row)
+        if top and not (goal and top[0][0] == goal):
+            out.append(Text(f"        instead: {clip(top[0][0], 110)}", style="dim"))
+    best = fr.best
+    out.append(Rule(style="dim"))
+    if best is None:
+        out.append(Text("None of these fixes holds on the recorded context. Try your own with "
+                        "runtape rerun --system-file or --replace.", style="bold yellow"))
+    elif best.add_system:
+        out.append(Text("Recommended: add this to the system prompt", style="bold green"))
+        for line in best.add_system.split("\n"):
+            out.append(Text("  " + line))
+    else:
+        out.append(Text("Recommended: " + best.change, style="bold green"))
+    if fr.stopped:
+        out.append(Text(f"! Stopped early ({fr.stopped}); some fixes were not fully checked.", style="yellow"))
+    out.append(Text(f"{fr.calls} model calls, {fr.cache_hits} from cache.", style="dim"))
+    return Group(*out)

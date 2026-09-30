@@ -532,8 +532,42 @@ class Distribution:
             raise AssertionError(f"{tool} was called in only {n}/{len(self.replies)} runs")
         return self
 
+    def matching(self, pattern: str) -> int:
+        """Runs whose reply matches a regex (on the text and on each tool call as `name {json args}`)."""
+        rx = re.compile(pattern, re.I)
+        return sum(bool(rx.search(_reply_text(r))) for r in self.replies)
+
+    def never_matches(self, pattern: str) -> "Distribution":
+        n = self.matching(pattern)
+        if n:
+            raise AssertionError(f"/{pattern}/ matched in {n}/{len(self.replies)} runs")
+        return self
+
     def __len__(self) -> int:
         return len(self.replies)
+
+
+def _reply_text(r: Reply) -> str:
+    parts = [r.text or ""]
+    for tc in r.tool_calls:
+        parts.append(f"{tc.get('name')} {json.dumps(tc.get('arguments'), sort_keys=True, ensure_ascii=False)}")
+    return "\n".join(parts)
+
+
+def current_system(req: dict) -> str:
+    """The request's system prompt as text ("" if none)."""
+    if req.get("api") in ("chat.completions", "langchain"):
+        parts = [m.get("content") for m in req.get("messages") or []
+                 if isinstance(m, dict) and m.get("role") in ("system", "developer")]
+    else:
+        parts = [req.get("system")]
+    out = []
+    for p in parts:
+        if isinstance(p, str):
+            out.append(p)
+        elif isinstance(p, list):
+            out.extend(b.get("text", "") for b in p if isinstance(b, dict))
+    return "\n\n".join(x for x in out if x)
 
 
 # ---------------------------------------------------------------- what-if
@@ -548,6 +582,7 @@ def edited_request(
     system: str | None = None,
     model_name: str | None = None,
     fill: str | None = None,
+    add_system: str | None = None,
 ) -> tuple[dict, list[str]]:
     """The recorded request with edits applied. Returns (request, notes on what changed)."""
     from .segments import ablate, extract, fill_text, find, replace_text
@@ -570,13 +605,18 @@ def edited_request(
         if n == 0:
             raise ValueError(f"'{old}' doesn't appear anywhere in the context")
         notes.append(f"replaced '{old}' ({n}x)")
+    if add_system:
+        base = system if system is not None else current_system(req)
+        system = (base + "\n\n" + add_system).strip() if base else add_system
+        notes.append("added to the system prompt")
     if system is not None:
         if req.get("api") == "chat.completions" or (req.get("api") == "langchain"):
             msgs = [m for m in req["messages"] if not (isinstance(m, dict) and m.get("role") in ("system", "developer"))]
             req["messages"] = [{"role": "system", "content": system}] + msgs
         else:
             req["system"] = system
-        notes.append("new system prompt")
+        if not add_system:
+            notes.append("new system prompt")
     if model_name:
         req["model"] = model_name
         notes.append(f"model {model_name}")
@@ -597,6 +637,7 @@ def rerun(
     budget: int | None = 100,
     workers: int = 8,
     fill: str | None = None,
+    add_system: str | None = None,
 ) -> Distribution:
     """Re-run one decision from a trace, as recorded or with edits, and return what the model did.
 
@@ -608,7 +649,7 @@ def rerun(
         trace = Trace.load(trace)
     rid, resp = request_for(trace, event_id)
     req, notes = edited_request(trace, rid, drop=drop, replace=replace, system=system, model_name=model_name,
-                                fill=fill)
+                                fill=fill, add_system=add_system)
     if model is None:
         model = model_for(req)
     elif not isinstance(model, (AnthropicModel, OpenAIChatModel, OpenAIResponsesModel, FunctionModel)):
