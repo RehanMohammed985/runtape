@@ -537,6 +537,18 @@ class Distribution:
         rx = re.compile(pattern, re.I)
         return sum(bool(rx.search(_reply_text(r))) for r in self.replies)
 
+    def calls_matching(self, pattern: str) -> int:
+        """Runs with a tool call matching a regex (on `name {json args}`), ignoring the reply text."""
+        rx = re.compile(pattern, re.I)
+        return sum(any(rx.search(f"{tc.get('name')} {json.dumps(tc.get('arguments'), sort_keys=True, ensure_ascii=False)}")
+                       for tc in r.tool_calls) for r in self.replies)
+
+    def never_calls_matching(self, pattern: str) -> "Distribution":
+        n = self.calls_matching(pattern)
+        if n:
+            raise AssertionError(f"a tool call matching /{pattern}/ was made in {n}/{len(self.replies)} runs")
+        return self
+
     def never_matches(self, pattern: str) -> "Distribution":
         n = self.matching(pattern)
         if n:
@@ -605,7 +617,19 @@ def edited_request(
         if n == 0:
             raise ValueError(f"'{old}' doesn't appear anywhere in the context")
         notes.append(f"replaced '{old}' ({n}x)")
-    if add_system:
+    if add_system and system is None and req.get("api") in ("chat.completions", "langchain"):
+        # add to the first system (or developer) message and leave any others where they are
+        msgs = req.get("messages") or []
+        first = next((m for m in msgs if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
+        if first is None:
+            req["messages"] = [{"role": "system", "content": add_system}] + list(msgs)
+        elif isinstance(first.get("content"), list):
+            first["content"] = list(first["content"]) + [{"type": "text", "text": add_system}]
+        else:
+            first["content"] = ((first.get("content") or "") + "\n\n" + add_system).strip()
+        notes.append("added to the system prompt")
+        add_system = None
+    elif add_system:
         base = system if system is not None else current_system(req)
         system = (base + "\n\n" + add_system).strip() if base else add_system
         notes.append("added to the system prompt")

@@ -147,19 +147,24 @@ def build_server(model_fn: str | None = None):
         return _text(render.show_why(rep, show_all=True))
 
     @mcp.tool()
-    def fix(event: str, trace: str = "last", runs: int = 10, budget: int = 600, write_test: str | None = None) -> str:
+    def fix(event: str, trace: str = "last", runs: int = 10, budget: int = 600, match: str | None = None,
+            tool: str | None = None, write_test: str | None = None) -> str:
         """Find what caused a decision, then check candidate fixes (system prompt rules, fixing the source) by
-        rerunning the decision with each one. Reports which fixes hold. write_test: a path for a pytest file
-        using the best verified fix. Costs model calls (capped by budget), cached on disk."""
-        from .fix import fix as run_fix, write_test as _write
+        rerunning the decision with each one. Reports which fixes hold. match/tool: what the decision is (see
+        why). write_test: a path for a pytest file using the best passing fix. Costs model calls (capped by
+        budget), cached on disk."""
+        from .fix import check_for, fix as run_fix, test_for, unique_path
+        from .why import make_target
 
         t = _trace(trace)
         ev = _event(t, event, decision=True)
-        fr = run_fix(t, ev, model=model(), runs=runs, budget=budget)
+        if write_test:
+            check_for(make_target(t, ev, tool=tool, match=match))
+        fr = run_fix(t, ev, model=model(), runs=runs, budget=budget, match=match, tool=tool)
         text = _text(render.show_fix(fr))
-        if write_test and fr.best is not None:
-            path = _write(t.path, ev, fr.report.target, write_test, add_system=fr.best.add_system, runs=runs)
-            text += f"\nRegression test written to {path}."
+        if write_test:
+            path = test_for(fr, t, ev, unique_path(write_test), runs=runs, model_fn=model_fn)
+            text += f"\nRegression test written to {path}." if path else "\nNo fix passed, so no test was written."
         return text
 
     @mcp.tool()

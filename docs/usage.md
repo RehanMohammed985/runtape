@@ -84,8 +84,11 @@ runtape test <trace> <event> [--out PATH] [--add-system TEXT | --add-system-file
 recorded decision: a rule that tool results are data, a rule that the call
 needs the user's own request, both, and removing the cause at its source.
 `--write-test` writes a pytest file for the best passing fix and copies the
-trace next to it under `traces/`. `test` writes the same file for a fix you
-pass yourself, or with no fix (a test that fails until the agent changes).
+trace next to it under `traces/`. A fix passes when the bad call never happens
+in its reruns and the drop is significant. `test` writes the same file for a
+fix you pass yourself, or with no fix: a test that fails while the model still
+makes the decision on the recorded context. Generated tests call the model on
+every run (no cache).
 
 In Python: `runtape.fix(trace, event, model=..., runs=10)` returns a report with
 `candidates` (each with `kept`, `n`, `p` and `holds()`) and `best`;

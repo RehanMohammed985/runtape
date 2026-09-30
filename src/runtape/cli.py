@@ -205,15 +205,18 @@ def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replac
 
 def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=None, model_fn=None, budget=600,
             cache=True, yes=False, write_test=None, fill=None) -> int:
-    from .fix import fix, write_test as _write
+    from .fix import check_for, fix, test_for, unique_path
+    from .why import make_target
 
+    if write_test:
+        check_for(make_target(trace, event, tool=tool, match=match))  # fail now, before spending model calls
     model = _model(model_fn)
     if model is None and not yes and sys.stdin.isatty():
         from .why import estimate_calls
 
         likely, _ = estimate_calls(trace, event)
-        c.print(Text(f"This finds the cause (about {likely} model calls) and then checks up to 4 fixes with "
-                     f"{runs} reruns each. Replies are cached.", style="dim"))
+        c.print(Text(f"This finds the cause (about {likely} model calls), then checks up to 4 fixes with {runs} "
+                     f"reruns each, {budget} calls at most. Replies are cached.", style="dim"))
         if input("Continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
             return 1
     counter = {"n": 0}
@@ -227,28 +230,31 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
         fr = fix(trace, event, model=model, runs=runs, budget=budget, cache_dir=".runtape/cache" if cache else None,
                  progress=progress, tool=tool, match=match, fill=fill, on_call=on_call)
     c.print(render.show_fix(fr))
-    best = fr.best
     if write_test:
-        if best is None:
-            c.print(Text("No verified fix, so no test was written.", style="yellow"))
+        path = test_for(fr, trace, event, unique_path(write_test), runs=runs, model_fn=model_fn)
+        if path is None:
+            c.print(Text("No fix passed, so no test was written.", style="yellow"))
             return 1
-        path = _write(trace.path, event, fr.report.target, write_test, add_system=best.add_system, runs=runs,
-                      model_fn=model_fn, note=f"Fix checked by runtape fix: {best.name}, "
-                                            f"{fr.report.target.describe()} in {best.kept}/{best.n} reruns "
-                                            f"(was {fr.report.baseline.kept}/{fr.report.baseline.n}).")
         c.print(Text(f"Regression test written to {path}. Run it with: pytest {path}", style="bold"))
-    elif best is not None and best.add_system:
-        c.print(Text(f"Turn it into a test: runtape fix {trace.path} {event} --write-test tests/test_agent_regression.py",
-                     style="dim"))
+    elif fr.best is not None:
+        c.print(Text(f"Turn it into a test: runtape fix {trace.path} {event} --write-test "
+                     f"tests/test_{_test_stem(fr.report.target)}.py", style="dim"))
     return 0
 
 
-def run_test(c: Console, trace: Trace, event: int, *, out, tool=None, match=None, add_system=None, runs=10,
+def _test_stem(target) -> str:
+    from .fix import test_name
+
+    return test_name(target)
+
+
+def run_test(c: Console, trace: Trace, event: int, *, out=None, tool=None, match=None, add_system=None, runs=10,
              model_fn=None) -> int:
-    from .fix import write_test as _write
+    from .fix import test_name, unique_path, write_test as _write
     from .why import make_target
 
     target = make_target(trace, event, tool=tool, match=match)
+    out = unique_path(out or f"tests/test_{test_name(target)}.py")
     path = _write(trace.path, event, target, out, add_system=add_system, runs=runs, model_fn=model_fn)
     c.print(Text(f"Regression test written to {path}. Run it with: pytest {path}", style="bold"))
     return 0
@@ -658,7 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("test", help="write a pytest regression test for a recorded decision")
     s.add_argument("trace", help="trace file, part of its name, or 'last'")
     s.add_argument("event", help="the decision: " + ref_help)
-    s.add_argument("--out", default="tests/test_agent_regression.py", help="where to write the test")
+    s.add_argument("--out", help="where to write the test (default tests/test_<decision>.py)")
     s.add_argument("--add-system", help="text to add to the system prompt (a fix) in the test")
     s.add_argument("--add-system-file", help="the same, read from a file")
     s.add_argument("--tool", help="the decision is whether this tool gets called")

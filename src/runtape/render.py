@@ -724,7 +724,15 @@ def show_fix(fr) -> RenderableType:
         out.append(Text(f"Without the cause, the agent instead {clip(goal, 150)}", style="dim"))
     for c in fr.candidates:
         ok = c.holds()
-        row = Text("  PASS  " if ok else "  FAIL  ", style="bold green" if ok else "bold red")
+        if not c.complete:
+            row = Text("  ----  ", style="bold yellow")
+            row.append(f"{c.name:<18}", style="bold")
+            row.append(f"not fully checked ({c.n} reruns before the budget ran out)", style="yellow")
+            out.append(row)
+            continue
+        label, style = ("  PASS  ", "bold green") if ok else (("  PART  ", "bold yellow") if c.partial()
+                                                             else ("  FAIL  ", "bold red"))
+        row = Text(label, style=style)
         row.append(f"{c.name:<18}", style="bold")
         row.append(f"{tgt.describe()} in {_ratio(c.kept, c.n)} reruns")
         if c.p is not None and ok:
@@ -738,15 +746,20 @@ def show_fix(fr) -> RenderableType:
     best = fr.best
     out.append(Rule(style="dim"))
     if best is None:
-        out.append(Text("None of these fixes holds on the recorded context. Try your own with "
-                        "runtape rerun --system-file or --replace.", style="bold yellow"))
+        out.append(Text("No fix removed the bad call in every rerun. PART means it became rarer but still "
+                        "happened. Try your own with runtape rerun --system-file or --replace.", style="bold yellow"))
     elif best.add_system:
         out.append(Text("Recommended: add this to the system prompt", style="bold green"))
         for line in best.add_system.split("\n"):
             out.append(Text("  " + line))
     else:
         out.append(Text("Recommended: " + best.change, style="bold green"))
+    if rep.stopped:
+        out.append(Text(f"! Finding the cause stopped early ({rep.stopped}); the cause above may be incomplete.",
+                        style="yellow"))
     if fr.stopped:
-        out.append(Text(f"! Stopped early ({fr.stopped}); some fixes were not fully checked.", style="yellow"))
-    out.append(Text(f"{fr.calls} model calls, {fr.cache_hits} from cache.", style="dim"))
+        out.append(Text(f"! Stopped early ({fr.stopped}); some fixes were not fully checked. Raise --budget; "
+                        "finished reruns are cached.", style="yellow"))
+    out.append(Text(f"{rep.calls + fr.calls} model calls ({rep.calls} finding the cause, {fr.calls} checking fixes), "
+                    f"{rep.cache_hits + fr.cache_hits} from cache.", style="dim"))
     return Group(*out)

@@ -77,7 +77,8 @@ def test_fix_cli_writes_a_test(tmp_path, monkeypatch):
     assert code == 0, out
     assert "FAIL  untrusted content" in out and "PASS  action guard" in out
     src = (tmp_path / "tests" / "test_ops.py").read_text()
-    assert "def test_never_run_command_make_db_reset" in src and 'never_matches(r"db-reset|dropdb")' in src
+    assert "def test_never_run_command_make_db_reset" in src and "never_calls_matching('db-reset|dropdb')" in src
+    assert "cache_dir=None" in src
 
 
 def test_rerun_add_system_appends():
@@ -85,3 +86,140 @@ def test_rerun_add_system_appends():
 
     assert current_system({"api": "chat.completions", "messages": [{"role": "system", "content": "A"}]}) == "A"
     assert current_system({"api": "messages", "system": [{"type": "text", "text": "B"}]}) == "B"
+
+
+def _run_pytest(path, cwd):
+    return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-W", "error", str(path)],
+                          cwd=cwd, capture_output=True, text=True)
+
+
+def _ops_trace(tmp_path):
+    ops = _ex("ops_agent")
+    path, _ = ops.main(tmp_path / "ops.jsonl")
+    return ops, path, ops.destructive_call(path)
+
+
+def test_regex_with_backslashes_is_written_correctly(tmp_path):
+    ops, path, ev = _ops_trace(tmp_path)
+    from runtape.why import make_target
+
+    t = Trace.load(path)
+    target = make_target(t, ev, match=r"make\s+db-reset")
+    fn = f"{EX / 'ops_agent.py'}:simulated_model"
+    unfixed = write_test(path, ev, target, tmp_path / "tests" / "test_unfixed.py", model_fn=fn)
+    r = _run_pytest(unfixed, tmp_path.parent)  # from another directory, with warnings as errors
+    assert r.returncode == 1 and "was made in 10/10 runs" in r.stdout, r.stdout + r.stderr
+
+
+def test_mentioning_the_command_in_text_does_not_fail_the_test(tmp_path):
+    ops, path, ev = _ops_trace(tmp_path)
+
+    def asks(req):  # with the guard, it asks the user about the command instead of running it
+        system = " ".join(str(m.get("content")) for m in req["messages"] if m.get("role") == "system")
+        if "Do not call" in system:
+            return {"text": "The runbook says to run make db-reset, which drops QA data. Run make migrate instead?"}
+        return ops.simulated_model(req)
+
+    t = Trace.load(path)
+    fr = fix(t, ev, model=FunctionModel(asks), match="db-reset|dropdb", cache_dir=None)
+    assert fr.best is not None and fr.best.name == "action guard"
+    from runtape.fix import test_for
+
+    from runtape import rerun
+
+    out = test_for(fr, t, ev, tmp_path / "tests" / "test_asks.py")
+    src = out.read_text()
+    assert "never_calls_matching" in src
+    dist = rerun(t, ev, runs=5, add_system=fr.best.add_system, model=asks, cache_dir=None)
+    dist.never_calls_matching("db-reset|dropdb")  # passes: only a mention in text
+
+
+def test_one_in_ten_is_not_a_pass(tmp_path):
+    ops, path, ev = _ops_trace(tmp_path)
+    count = {"n": 0}
+
+    def sometimes(req):
+        system = " ".join(str(m.get("content")) for m in req["messages"] if m.get("role") == "system")
+        if "Do not call" in system:
+            count["n"] += 1
+            if count["n"] % 10 == 1:
+                return {"tool_calls": [{"id": "x", "name": "run_command", "arguments": {"command": "make db-reset"}}]}
+            return {"tool_calls": [{"id": "x", "name": "run_command", "arguments": {"command": "make migrate"}}]}
+        return ops.simulated_model(req)
+
+    fr = fix(Trace.load(path), ev, model=FunctionModel(sometimes), match="db-reset|dropdb", cache_dir=None)
+    guard = next(c for c in fr.candidates if c.name == "action guard")
+    assert guard.kept == 1 and not guard.holds() and guard.partial()
+    assert fr.best is not None and fr.best.kept == 0
+
+
+def test_source_fix_test_drops_the_cause(tmp_path):
+    ops, path, ev = _ops_trace(tmp_path)
+
+    def stubborn(req):  # ignores every prompt rule; only removing the runbook line helps
+        msgs = [m for m in req["messages"] if m.get("role") != "system"]
+        return ops.simulated_model({"messages": [{"role": "system", "content": "x"}] + msgs})
+
+    t = Trace.load(path)
+    fr = fix(t, ev, model=FunctionModel(stubborn), match="db-reset|dropdb", cache_dir=None)
+    assert fr.best is not None and fr.best.name == "fix the source"
+    from runtape.fix import test_for
+
+    out = test_for(fr, t, ev, tmp_path / "tests" / "test_source.py", model_fn=f"{EX / 'ops_agent.py'}:simulated_model")
+    src = out.read_text()
+    assert "DROP = [" in src and "drop=DROP" in src
+    assert _run_pytest(out, tmp_path).returncode == 0
+
+
+def test_budget_covers_both_steps_and_unchecked_fixes_are_marked(tmp_path):
+    ops, path, ev = _ops_trace(tmp_path)
+    calls = {"n": 0}
+
+    def counted(req):
+        calls["n"] += 1
+        return ops.simulated_model(req)
+
+    fr = fix(Trace.load(path), ev, model=FunctionModel(counted), match="db-reset|dropdb", cache_dir=None, budget=100)
+    assert calls["n"] <= 100
+    assert fr.stopped and any(not c.complete for c in fr.candidates)
+    from runtape import render
+
+    buf = io.StringIO()
+    Console(file=buf, width=200, no_color=True).print(render.show_fix(fr))
+    assert "not fully checked" in buf.getvalue()
+
+
+def test_generated_test_names_do_not_overwrite(tmp_path):
+    from runtape.fix import unique_path
+
+    p = tmp_path / "t.py"
+    p.write_text("x")
+    assert unique_path(p).name == "t_2.py"
+
+
+def test_text_answer_refused_before_spending_calls(tmp_path):
+    from runtape.fix import check_for
+    from runtape.why import make_target
+
+    inbox = _ex("inbox_agent")
+    path, _ = inbox.main(tmp_path / "inbox.jsonl")
+    t = Trace.load(path)
+    last = t.of_type("llm_response")[-1].id
+    import pytest
+
+    with pytest.raises(ValueError, match="text answer"):
+        check_for(make_target(t, last))
+
+
+def test_add_system_leaves_other_system_messages_in_place(tmp_path):
+    from runtape import Recorder
+    from runtape.rerun import edited_request
+
+    rec = Recorder(tmp_path / "t.jsonl")
+    msgs = [{"role": "developer", "content": "Be brief."}, {"role": "user", "content": "hi"},
+            {"role": "system", "content": "LATE REMINDER"}, {"role": "user", "content": "go"}]
+    rid = rec.log_llm_request(provider="openai", api="chat.completions", model="m", messages=msgs)
+    rec.close()
+    req, _ = edited_request(Trace.load(rec.path), rid, add_system="FIX")
+    assert [m["role"] for m in req["messages"]] == ["developer", "user", "system", "user"]
+    assert req["messages"][0]["content"] == "Be brief.\n\nFIX" and req["messages"][2]["content"] == "LATE REMINDER"
