@@ -706,6 +706,11 @@ def show_fix(fr) -> RenderableType:
     head.append(tgt.question(), style="bold yellow")
     out.append(head)
     out.append(Text(f"Without a fix it does this in {_ratio(b.kept, b.n)} reruns of the recorded context.", style="dim"))
+    for w in rep.warnings:  # an unstable decision or a stopped search changes how to read everything below
+        out.append(Text("! " + w, style="yellow"))
+    if fr.cause is None and b.kept:
+        out.append(Text("! No cause was found in the context, so only fixes that don't depend on one are tried.",
+                        style="yellow"))
     if fr.cause is not None:
         t = fr.cause.refined or fr.cause.finest
         c = Text("Cause: ", style="bold")

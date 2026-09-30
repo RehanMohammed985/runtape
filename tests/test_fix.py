@@ -223,3 +223,26 @@ def test_add_system_leaves_other_system_messages_in_place(tmp_path):
     req, _ = edited_request(Trace.load(rec.path), rid, add_system="FIX")
     assert [m["role"] for m in req["messages"]] == ["developer", "user", "system", "user"]
     assert req["messages"][0]["content"] == "Be brief.\n\nFIX" and req["messages"][2]["content"] == "LATE REMINDER"
+
+
+def test_fix_report_warns_about_an_unstable_decision(tmp_path):
+    import random
+
+    ops, path, ev = _ops_trace(tmp_path)
+    rng = random.Random(3)
+
+    def coin(req):  # makes the call about half the time, whatever the context says
+        if rng.random() < 0.5:
+            return {"tool_calls": [{"id": "x", "name": "run_command", "arguments": {"command": "make db-reset"}}]}
+        return {"tool_calls": [{"id": "x", "name": "run_command", "arguments": {"command": "make migrate"}}]}
+
+    fr = fix(Trace.load(path), ev, model=FunctionModel(coin), match="db-reset|dropdb", cache_dir=None)
+    from runtape import render
+
+    buf = io.StringIO()
+    Console(file=buf, width=200, no_color=True).print(render.show_fix(fr))
+    out = buf.getvalue()
+    if fr.report.base < 0.6:
+        assert "Unstable decision" in out
+    if fr.cause is None:
+        assert "No cause was found" in out
