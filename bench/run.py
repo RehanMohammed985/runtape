@@ -183,7 +183,7 @@ def main(argv=None):
             with (out.parent / f"{label}.errors.log").open("a") as f:
                 f.write(f"{case.id}: {msg}\n")
             status = getattr(e, "status_code", None)
-            if status in (400, 401, 403, 404):  # the same for every case: stop instead of repeating it
+            if status in (400, 401, 402, 403, 404):  # the same for every case: stop instead of repeating it
                 print(f"{case.id}: the model server refused the request ({msg[:300]})")
                 print("Stopping: every case would fail the same way.")
                 return 2
