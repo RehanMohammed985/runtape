@@ -12,6 +12,8 @@ For each generated case:
     python bench/run.py --local llama3.1:8b --cases 20                 # free, through Ollama
     python bench/run.py --openai gpt-4o-mini --cases 20 --budget 300   # needs OPENAI_API_KEY
     python bench/run.py --anthropic claude-haiku-4-5 --cases 20        # needs ANTHROPIC_API_KEY
+    python bench/run.py --openai accounts/fireworks/models/gpt-oss-120b --max-tokens 2000 --cases 25 \\
+        --base-url https://api.fireworks.ai/inference/v1               # an OpenAI-compatible provider
     python bench/run.py --model-fn bench/sim.py:model --cases 10       # offline check of the harness
 
 Results are appended to a JSONL file (one line per case) and summarized with bench/report.py.
@@ -122,6 +124,8 @@ def main(argv=None):
     g.add_argument("--anthropic", metavar="MODEL")
     g.add_argument("--model-fn", help="a Python model function, for testing the harness offline")
     ap.add_argument("--local-url", default="http://localhost:11434/v1")
+    ap.add_argument("--base-url", help="with --openai: any OpenAI-compatible provider, e.g. "
+                    "https://api.fireworks.ai/inference/v1 (key in OPENAI_API_KEY)")
     ap.add_argument("--cases", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--scenarios", help="comma-separated subset: refund,inbox,ops,cleanup,access")
@@ -136,7 +140,7 @@ def main(argv=None):
     if a.local:
         provider, model, endpoint = "openai", a.local, a.local_url.rstrip("/")
     elif a.openai:
-        provider, model, endpoint = "openai", a.openai, None
+        provider, model, endpoint = "openai", a.openai, (a.base_url.rstrip("/") if a.base_url else None)
     elif a.anthropic:
         provider, model, endpoint = "anthropic", a.anthropic, None
     else:
