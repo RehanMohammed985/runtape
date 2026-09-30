@@ -414,6 +414,7 @@ class Why:
         self._decision = target.decision_text()
         self.base_trial = Trial([])
         self._earlier = None
+        self._values: list | None = None
         self.tested = 0  # every removal compared so far; confirmations correct for all of them
 
     # -- running trials
@@ -509,7 +510,12 @@ class Why:
         (same tool and arguments: it is just fetching the removed data again)."""
         alt = t.top_instead()
         reply = t.examples.get(alt[0]) if alt else None
-        if reply is None or not reply.tool_calls:
+        if reply is None:
+            return 1
+        own = {c.get("name") for c in self.target.recorded.tool_calls}
+        if self._is_value(t.removed) and not any(tc.get("name") in own for tc in reply.tool_calls):
+            return 2  # the piece is a value the call uses (the amount, the path): without it the agent finds or asks for it
+        if not reply.tool_calls:
             return 1
         if self._earlier is None:
             self._earlier = {(e.payload.get("name"), _canon(_loose(e.payload.get("arguments"))))
@@ -519,6 +525,17 @@ class Why:
         if all(self._refetches(tc, t.removed) for tc in reply.tool_calls):
             return 2
         return 0
+
+    def _is_value(self, removed: list) -> bool:
+        """Is the removed content essentially one of the decision's argument values (an order total of
+        "640.0", a listing line "120G /srv/backups"), as opposed to a sentence that mentions it?"""
+        if self._values is None:
+            self._values = _arg_values(self.target)
+        for seg in removed:
+            text = " ".join(seg.text.split()).lower()
+            if text and any(v in text and len(v) >= 0.4 * len(text) for v in self._values):
+                return True
+        return False
 
     def _refetches(self, tc: dict, removed: list) -> bool:
         """Does this call fetch the removed content again? True when it repeats the tool call that produced
