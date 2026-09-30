@@ -69,3 +69,14 @@ def test_lookup_of_the_target_is_not_the_headline(tmp_path):
     heads = [c for c in rep.causes if c.kind == "decisive"]
     assert heads and case.plant.rstrip(".") in heads[0].finest.removed[-1].text
     assert all(case.plant.rstrip(".") not in c.finest.removed[-1].text for c in rep.causes if c.kind != "decisive")
+
+
+def test_rescore_writes_a_scored_copy(tmp_path):
+    out = tmp_path / "r.jsonl"
+    subprocess.run([sys.executable, str(ROOT / "bench" / "run.py"), "--model-fn", str(ROOT / "bench" / "sim.py") + ":model",
+                    "--cases", "3", "--out", str(out), "--work", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / "traces" / "r").symlink_to(tmp_path / "traces" / "sim")
+    subprocess.run([sys.executable, str(ROOT / "bench" / "rescore.py"), str(out), "--work", str(tmp_path),
+                    "--model-fn", str(ROOT / "bench" / "sim.py") + ":model"], check=True, capture_output=True)
+    rows = [json.loads(line) for line in (tmp_path / "r.rescored.jsonl").read_text().splitlines()]
+    assert len(rows) == 3 and all(r.get("rescored") for r in rows if r["valid"])

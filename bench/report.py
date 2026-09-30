@@ -51,7 +51,8 @@ def summarize(path):
     print(f"- planted sentence among the reported causes: {pct(anyw, len(ran))}")
     print(f"- narrowed to exactly that sentence: {pct(sent, len(ran))}")
     print(f"- cases with another piece also reported as decisive: {pct(other, len(ran))}")
-    print(f"- stopped by the budget: {pct(stopped, len(ran))}")
+    print(f"- incomplete (the search stopped early: budget, or rescoring needed a reply never saved): "
+          f"{pct(stopped, len(ran))}")
     print(f"- model calls per case: median {statistics.median(calls):.0f}, max {max(calls)}")
     errors = [r for r in valid if "error" in r]
     if errors:
