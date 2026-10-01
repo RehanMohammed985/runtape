@@ -47,6 +47,27 @@ the main README. Two things the runs showed beyond the scores:
   different providers. Cases whose decision was no longer the model's usual
   choice when `why` ran are reported separately, not as misses.
 
+## Baselines
+
+`bench/baselines.py` attributes a decision three simpler ways, to compare with `why`: wording overlap
+(`why --dry`), plain leave-one-out over whole messages and tool results (one run per piece, or the
+largest drop over five), and asking a model which piece and sentence caused it. `bench/baselines_planted.py`
+scores the first two on these cases from saved replies, with no model calls; `bench/agentdojo` runs all
+three.
+
+On the 18 counted cases whose decision was still made consistently when `why` ran (results in
+`results/baselines-planted.jsonl`):
+
+| method | planted sentence | the piece holding it | something else |
+|---|---|---|---|
+| `why` (headline) | 15 | 3 | 0 |
+| wording overlap | 7 | 0 | 11 |
+| leave-one-out, largest drop over 5 runs | - | 16 | 2 |
+
+Leave-one-out with one run per piece flagged the piece holding the plant in all 18, and 37 other pieces
+with it (at least one in every case), mostly inputs the action needs, which it can't tell apart from the
+instruction. `why` lists those as also required, below the headline.
+
 Runs resume where they stopped; replies are cached in `bench/.cache`.
 `bench/sim.py` is a noisy stand-in model used only to test the harness.
 
