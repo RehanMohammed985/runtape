@@ -84,7 +84,10 @@ def pipeline_for(client, model: str, system: str = SYSTEM) -> AgentPipeline:
 
 
 def _client(base_url):
-    return openai.OpenAI(base_url=base_url) if base_url else openai.OpenAI()
+    # a request that hangs is retried after 3 minutes instead of the client's default 10, so one stuck call
+    # can't stall the run for half an hour
+    kw = {"timeout": 180, "max_retries": 3}
+    return openai.OpenAI(base_url=base_url, **kw) if base_url else openai.OpenAI(**kw)
 
 
 def target_value(injection_task, user_task, pre_env) -> tuple[str, str] | None:
