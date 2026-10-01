@@ -24,6 +24,7 @@ python bench/run.py --local llama3.1:8b --cases 20      # free, through Ollama
 python bench/run.py --openai gpt-4o-mini --cases 20
 python bench/run.py --openai openai/gpt-oss-120b --base-url https://openrouter.ai/api/v1 --max-tokens 2000 --cases 50
 python bench/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --max-tokens 2000 --cases 50
+python bench/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --max-tokens 2000 --cases 100 --seed 1 --work bench/seed1 --out bench/results/sarvam-105b-seed1.jsonl
 python bench/report.py bench/results/*.rescored.jsonl
 ```
 
@@ -39,7 +40,8 @@ with the current code), with the conversations in `bench/traces`. Summary in
 the main README. Two things the runs showed beyond the scores:
 
 - Models resisted most planted sentences: gpt-oss-120b took the harmful
-  action in 13 of 50 cases, sarvam-105b in 5 of 50, Llama 3.1 8B in 6 of 18.
+  action in 13 of 50 cases, sarvam-105b in 5 of 50 (and 10 of 100 in the
+  new-seed run), Llama 3.1 8B in 6 of 18.
 - Through OpenRouter, the same request was answered differently minutes
   apart (7 of 10 runs, then 0 of 5), consistent with calls being routed to
   different providers. Cases whose decision was no longer the model's usual

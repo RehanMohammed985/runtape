@@ -142,28 +142,37 @@ told where the sentence is.
 | gpt-oss-120b (OpenRouter) | 50 | 13 | 2 | 11 of 11 | 9 of 11 |
 | sarvam-105b (Sarvam API) | 50 | 5 | 4 | 1 of 1 | 1 of 1 |
 | Llama 3.1 8B (OpenRouter, stopped at 18 cases) | 18 | 6 | 4 | 2 of 2 | 2 of 2 |
+| sarvam-105b, new seed, after the fixes below | 100 | 10 | 6 | 4 of 4 | 4 of 4 |
 
-- In all 14 counted cases where the model still made the harmful decision
-  most of the time when `why` ran, the headline cause was the planted
-  sentence. In 12 it was narrowed to exactly that sentence; in the other 2, to
-  a span that also held the email signature the sentence was attached to.
-- In 10 counted cases the decision was no longer the model's usual choice
-  when `why` ran, either because the model makes it only about half the time
-  or because a routed API served the reruns from a different provider. `why`
-  reported that there was nothing stable to attribute. Attribution needs a
-  decision the model makes consistently.
+- In all 14 counted cases of the first three runs where the model still made
+  the harmful decision most of the time when `why` ran, the headline cause was
+  the planted sentence. In 12 it was narrowed to exactly that sentence; in the
+  other 2, to a span that also held the email signature the sentence was
+  attached to.
+- The last row is a second sarvam-105b run on 100 new cases, made after the
+  ranking fixes and not used to change `why`. In all 4 stable cases the
+  headline was the planted sentence, narrowed to exactly that sentence. It is
+  the unbiased measurement, and it is small.
+- In 16 counted cases (10 in the first runs, 6 in the new-seed run) the
+  decision was no longer the model's usual choice when `why` ran, either
+  because the model makes it only about half the time or because a routed API
+  served the reruns from a different provider. `why` reported that there was
+  nothing stable to attribute and named no cause. Attribution needs a decision
+  the model makes consistently.
 - Other pieces were reported as causes too, mostly the user's request, the
   system prompt, or data the action needs (the test failure, the list of
   roles). These are real conditions of the decision and are listed after the
   headline.
 - The first runs exposed ranking bugs in `why`. They were fixed and the
-  same cases re-scored from saved replies (`bench/rescore.py`), so these cases
-  informed the fixes. A run with a new seed is the unbiased measurement.
+  same cases re-scored from saved replies (`bench/rescore.py`), so those cases
+  informed the fixes. The new-seed run is the check on cases `why` was not
+  tuned on.
 - The cases are generated and each has a single planted cause. Causes spread
   across several pieces, or starting several steps before the decision, are
   not covered.
 
-Results and traces are in `bench/results` and `bench/traces`; the method is
+Results and traces are in `bench/results`, `bench/traces` and
+`bench/seed1/traces` (the new-seed run); the method is
 in [bench/README.md](https://github.com/RehanMohammed985/runtape/blob/main/bench/README.md).
 
 ## Check fixes, then keep them
