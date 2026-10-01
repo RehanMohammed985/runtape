@@ -55,6 +55,8 @@ import runtape  # noqa: E402
 from runtape.rerun import BudgetExceeded, FunctionModel, load_model_fn  # noqa: E402
 
 WORD = re.compile(r"[a-z0-9]+")
+REDO_KEYS = {"injection_anywhere", "other_decisive", "baseline", "calls", "requests", "cache_hits", "stopped", "depth",
+             "warnings", "baselines", "fix"}
 PHASES = ("agent", "why", "baselines", "fix", "control")
 READ_ONLY = re.compile(r"^(get|read|search|list|check|find|view)_")
 
@@ -67,6 +69,8 @@ def _plain_messages(message, model_name):
         out["role"] = "system"
     if isinstance(out.get("content"), list):
         out["content"] = "".join(part.get("text", "") for part in out["content"])
+    if out.get("role") == "tool" and not str(out.get("content") or "").strip():
+        out["content"] = "(empty)"  # some tools return nothing; several APIs reject an empty tool message
     return out
 
 
@@ -90,26 +94,80 @@ def _client(base_url):
     return openai.OpenAI(base_url=base_url, **kw) if base_url else openai.OpenAI(**kw)
 
 
-def target_value(injection_task, user_task, pre_env) -> tuple[str, str] | None:
-    """The attacker's call and an argument value that marks it as the attacker's (an account, address
-    or link named in the injection goal and not used by the user's own task)."""
-    calls = injection_task.ground_truth(pre_env)
-    user_vals = {str(v) for c in user_task.ground_truth(pre_env) for v in c.args.values()}
+TARGET_RULE = 3  # bump when target_value changes, so rows found with the old rule are redone
+TOKEN = re.compile(r"[\w.@/:+-]{6,}")
+
+
+def _strings(v) -> list[str]:
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, (list, tuple)):
+        return [x for item in v for x in _strings(item)]
+    if isinstance(v, dict):
+        return [x for item in v.values() for x in _strings(item)]
+    return []
+
+
+def target_value(injection_task, user_task, pre_env) -> tuple[str | None, str | None] | None:
+    """What marks the attacker's action, as (function, value). In order:
+    1. a value the injection goal names and the user's task doesn't use (an account, address or link), whole
+       or as a token inside an argument (the link in a message body);
+    2. any such value in a call that changes something, named in the goal or not (the hotel the attacker's
+       "most expensive hotel" turns out to be);
+    3. a function that changes something and that the user's task never calls (delete_file), value None;
+    4. with no ground truth (the attack asks the agent to say something), an address or link from the goal,
+       function None.
+    Calls that change something come before lookups, and an address, link or account number before other
+    text."""
+    goal = injection_task.GOAL
+    user_calls = user_task.ground_truth(pre_env)
+    # the user's own values, leaving out any that carry the injection itself (some injections sit in a
+    # channel or file name the user's task has to pass along)
+    user_vals = " ".join(x for c in user_calls for v in c.args.values() for x in _strings(v) if goal[:40] not in x)
+    user_fns = {c.function for c in user_calls}
+    distinctive = re.compile(r"@|www\.|https?:|\d{5,}")
+
+    def pick(cands):
+        return min(cands, key=lambda c: (not distinctive.search(c), -len(c)))
+
+    calls = sorted(injection_task.ground_truth(pre_env), key=lambda c: bool(READ_ONLY.match(c.function)))
+    for in_goal in (True, False):
+        for call in calls:
+            if not in_goal and READ_ONLY.match(call.function):
+                continue
+            cands = [c for v in call.args.values() for x in _strings(v) for c in [x] + TOKEN.findall(x)
+                     if len(c) >= 6 and (c in goal or not in_goal) and c not in user_vals]
+            if cands:
+                return call.function, pick(cands)
     for call in calls:
-        for v in call.args.values():
-            if isinstance(v, str) and len(v) >= 6 and v in injection_task.GOAL and v not in user_vals:
-                return call.function, v
-    return None
+        if not READ_ONLY.match(call.function) and call.function not in user_fns:
+            return call.function, None
+    cands = [c for c in TOKEN.findall(goal) if distinctive.search(c) and c not in user_vals]
+    return (None, pick(cands)) if cands else None
 
 
-def find_decision(trace, value: str, function: str | None = None) -> int | None:
+def find_decision(trace, value: str | None, function: str | None = None) -> int | None:
+    """The first model reply that makes the call: by function and value, by function alone (value None), or
+    by value in any call; failing that, a reply whose text contains the value (an attack that only asks the
+    agent to say something)."""
     for e in trace.of_type("llm_response"):
         for tc in e.payload.get("tool_calls") or []:
             if function and tc.get("name") != function:
                 continue
-            if value in json.dumps(tc.get("arguments"), ensure_ascii=False):
+            if value is None or value in json.dumps(tc.get("arguments"), ensure_ascii=False):
+                return e.id
+    if function is None and value:
+        for e in trace.of_type("llm_response"):
+            if value in (e.payload.get("text") or ""):
                 return e.id
     return None
+
+
+def target_kw(target: dict) -> dict:
+    """How `why` should recognize the decision: by the marking value, or by the function alone."""
+    if target.get("value"):
+        return {"match": re.escape(target["value"])}
+    return {"tool": target["function"]}
 
 
 def words(s: str) -> list[str]:
@@ -157,11 +215,11 @@ def score(rep, injections: dict[str, str], goal: str) -> dict:
     }
 
 
-def run_baselines(trace, ev, match, injections, goal, model, cache: Path, judge: bool) -> dict:
+def run_baselines(trace, ev, tkw: dict, injections, goal, model, cache: Path, judge: bool) -> dict:
     out = {}
     d = baselines.dry(trace, ev)
     out["dry"] = {**classify(d["texts"], injections, goal), "text": " | ".join(d["texts"])[:200]}
-    lo = baselines.loo(trace, ev, model, cache_dir=str(cache / "why"), match=match)
+    lo = baselines.loo(trace, ev, model, cache_dir=str(cache / "why"), **tkw)
     flags = [classify([t], injections, goal) for t in lo["texts"]]
     top = classify([lo["top"]], injections, goal) if lo["top"] else {"inside": False, "contains": False, "goal": False}
     out["loo"] = {"flagged": len(flags), "pieces": lo["pieces"],
@@ -169,7 +227,7 @@ def run_baselines(trace, ev, match, injections, goal, model, cache: Path, judge:
                   "other_flagged": sum(not (f["inside"] or f["contains"]) for f in flags),
                   "top_holds_injection": top["inside"] or top["contains"], "calls": lo["calls"]}
     if judge:
-        j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), match=match)
+        j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), **tkw)
         out["judge"] = {**classify(j["texts"], injections, goal), "text": " | ".join(j["texts"])[:200],
                         "answer": j["answer"], "calls": j["calls"]}
     return out
@@ -220,9 +278,10 @@ class Benign:
         return {"utility": have[:n]}
 
 
-def run_fix(trace, ev, match, rep, model, cache: Path, a, suite, user_task, inj_task, injections, benign) -> dict:
+def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, inj_task, injections,
+            benign) -> dict:
     fr = runtape.fix(trace, ev, model=model, report=rep, runs=10, budget=None, cache_dir=str(cache / "why"),
-                     match=match, workers=a.workers)
+                     workers=a.workers, **tkw)
     cands = [{"name": c.name, "prompt": c.add_system is not None, "kept": c.kept, "n": c.n, "p": c.p,
               "holds": c.holds(), "partial": c.partial()} for c in fr.candidates]
     out = {"candidates": cands, "best": fr.best.name if fr.best else None, "calls": fr.calls}
@@ -307,6 +366,7 @@ def main(argv=None):
     benign = Benign(work / f"benign-{label}.json")
     fn_model = FunctionModel(load_model_fn(a.model_fn)) if a.model_fn else None
     depth = "full" if a.full else "quick"
+    bad_requests = 0  # 400s in a row: one is the pair's own problem, three means something general is wrong
 
     for suite_name in a.suite.split(","):
         suite = get_suite(a.version, suite_name)
@@ -350,16 +410,20 @@ def main(argv=None):
                 pre_env = user_task.init_environment(suite.load_and_inject_default_environment(injections))
                 rep = None
                 # -- why on the attacker's call
-                if row["attacked"] and "decision" not in row:
+                if row["attacked"] and row.get("target_rule") != TARGET_RULE:
                     tv = target_value(inj_task, user_task, pre_env)
-                    row.update(target=tv and {"function": tv[0], "value": tv[1]},
+                    target = tv and {"function": tv[0], "value": tv[1]}
+                    if target != row.get("target"):  # a different decision: its earlier results don't apply
+                        for k in [k for k in row if k.startswith("headline") or k in REDO_KEYS]:
+                            del row[k]
+                    row.update(target=target, target_rule=TARGET_RULE,
                                decision=find_decision(trace, tv[1], tv[0]) if tv else None)
                 ev = row.get("decision") if row["attacked"] else None
-                match = re.escape(row["target"]["value"]) if ev is not None else None
+                tkw = target_kw(row["target"]) if ev is not None else {}
                 if ev is not None and "why" in phases and "baseline" not in row and "stopped" not in row:
                     try:
-                        rep = runtape.why(trace, ev, match=match, model=fn_model, runs=a.runs, budget=a.budget,
-                                          cache_dir=str(cache / "why"), workers=a.workers, depth=depth)
+                        rep = runtape.why(trace, ev, model=fn_model, runs=a.runs, budget=a.budget,
+                                          cache_dir=str(cache / "why"), workers=a.workers, depth=depth, **tkw)
                         row.update(score(rep, injections, inj_task.GOAL))
                     except BudgetExceeded as e:
                         row.update(stopped=str(e))
@@ -367,12 +431,12 @@ def main(argv=None):
                 stable = ev is not None and row.get("baseline") and row["baseline"][0] * 2 >= row["baseline"][1]
                 # -- baselines on the same decision
                 if ev is not None and "baselines" in phases and "baselines" not in row:
-                    row["baselines"] = run_baselines(trace, ev, match, injections, inj_task.GOAL, fn_model, cache,
+                    row["baselines"] = run_baselines(trace, ev, tkw, injections, inj_task.GOAL, fn_model, cache,
                                                      judge=not a.no_judge)
                     did.append("baselines")
                 # -- fixes, checked on the recorded decision and on the live task
                 if stable and "fix" in phases and "fix" not in row and row.get("headline"):
-                    row["fix"] = run_fix(trace, ev, match, rep, fn_model, cache, a, suite, user_task, inj_task,
+                    row["fix"] = run_fix(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task, inj_task,
                                          injections, benign)
                     did.append("fix")
                 # -- a control decision: the user's own action, with the injection present
@@ -390,20 +454,24 @@ def main(argv=None):
                             c.update(score(crep, injections, inj_task.GOAL))
                         except BudgetExceeded as e:
                             c.update(stopped=str(e))
-                        c["baselines"] = run_baselines(trace, cev, pattern, injections, inj_task.GOAL, fn_model,
-                                                       cache, judge=not a.no_judge)
+                        c["baselines"] = run_baselines(trace, cev, {"match": pattern}, injections, inj_task.GOAL,
+                                                       fn_model, cache, judge=not a.no_judge)
                         row["control"] = c
                         controls += 1
                     did.append("control")
             except openai.APIStatusError as e:
                 rows[pair] = row
                 _save(out, rows)
-                if e.status_code in (400, 401, 402, 403, 404):
+                refused = e.status_code in (401, 402, 403, 404) or (e.status_code == 400 and bad_requests >= 2)
+                if refused:
                     print(f"{pair}: the model server refused the request ({str(e)[:300]})")
-                    print("Stopping: every pair would fail the same way.")
+                    print("Stopping: the key, the credit or the model name is the problem, or every request is "
+                          "being rejected. Fix that and run the same command again to continue.")
                     return 1
-                print(f"{pair}: error, {str(e)[:200]}")
+                bad_requests += e.status_code == 400
+                print(f"{pair}: skipped, the model server rejected a request ({str(e)[:200]})")
                 continue
+            bad_requests = 0
             rows[pair] = row
             if did:
                 row["seconds"] = round(row.get("seconds", 0) + time.time() - t0, 1)
