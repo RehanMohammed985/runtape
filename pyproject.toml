@@ -35,7 +35,7 @@ Issues = "https://github.com/RehanMohammed985/runtape/issues"
 packages = ["src/runtape"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["bench/traces", "bench/results", "bench/seed1", "bench/_local_runs", "bench/.cache", "bench/*.tgz", ".runtape", "docs/*.gif", "docs/*.svg"]
+exclude = ["bench/traces", "bench/results", "bench/seed1", "bench/agentdojo/traces", "bench/agentdojo/.cache", "bench/_local_runs", "bench/.cache", "bench/*.tgz", ".runtape", "docs/*.gif", "docs/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

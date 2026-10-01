@@ -8,6 +8,7 @@ dist/
 
 bench/.cache/
 bench/seed1/.cache/
+bench/agentdojo/.cache/
 bench/traces/*
 !bench/traces/openai_gpt-oss-120b/
 !bench/traces/sarvam-105b/
