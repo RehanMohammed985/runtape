@@ -336,6 +336,8 @@ def main(argv=None):
     ap.add_argument("--phases", default="agent,why", help=f"comma list of {', '.join(PHASES)}")
     ap.add_argument("--paper", action="store_true", help="every phase, on all four suites")
     ap.add_argument("--full", action="store_true", help="run why with --full")
+    ap.add_argument("--redo", default="", help="phases to run again on pairs that have them (why, baselines, fix, "
+                    "control), e.g. after runtape changes; cached reruns are reused")
     ap.add_argument("--no-judge", action="store_true", help="skip the model-as-judge baseline")
     ap.add_argument("--live-runs", type=int, default=3, help="full task runs per fix, with and without attack")
     ap.add_argument("--controls", type=int, default=10, help="control decisions per suite (control phase)")
@@ -367,6 +369,16 @@ def main(argv=None):
     fn_model = FunctionModel(load_model_fn(a.model_fn)) if a.model_fn else None
     depth = "full" if a.full else "quick"
     bad_requests = 0  # 400s in a row: one is the pair's own problem, three means something general is wrong
+
+    redo = set(filter(None, a.redo.split(",")))
+    if redo:
+        for row in rows.values():
+            if "why" in redo:  # the fixes are based on why's cause, so they go too; the baselines stay
+                for k in [k for k in row if k.startswith("headline") or (k in REDO_KEYS and k != "baselines")]:
+                    del row[k]
+            for ph in redo & {"baselines", "fix", "control"}:
+                row.pop(ph, None)
+        _save(out, rows)
 
     for suite_name in a.suite.split(","):
         suite = get_suite(a.version, suite_name)

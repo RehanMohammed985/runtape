@@ -591,13 +591,17 @@ class Why:
         # 1. re-fetched input last
         # 2. content the agent read or wrote (tool results, its own earlier replies) before the user's request
         #    and the system prompt: those are expected to drive its actions, and they are listed too
-        # 3. a different action before stopping or answering
-        # 4. the piece that shares the most wording with what the agent did, then the larger effect
+        # 3. a cause narrowed to a part (a sentence, an item) before a whole message or tool result that
+        #    couldn't be: all of a whole piece mattering is what data the action uses looks like, and a
+        #    narrowed part is the sharper answer (the instruction, not the records it says to send)
+        # 4. a different action before stopping or answering
+        # 5. the piece that shares the most wording with what the agent did, then the larger effect
         t = c.refined or c.finest
         text = " ".join(s.text for s in t.removed)
         cls = self._alt_class(t)
         given = all(s.kind in ("user", "system") for s in t.removed)
-        return (cls == 2, given, cls, -overlap(text, self._decision), -t.effect(self.base))
+        narrowed = c.refined is not None or len(c.chain) > 1
+        return (cls == 2, given, not narrowed, cls, -overlap(text, self._decision), -t.effect(self.base))
 
     # -- search
 

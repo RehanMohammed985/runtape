@@ -115,9 +115,11 @@ runtape why <trace> <event>
 5. Look inside pieces whose removal changes nothing, for a cause hidden next
    to content that pushes the other way.
 6. Find causes that repeat or that are each enough on their own.
-7. Lead with the piece that changes what the agent does. Pieces it only needs
-   as input (without them it stops or looks the data up again) are listed as
-   also required.
+7. Lead with the piece that changes what the agent does, and among those, one
+   narrowed to a sentence or item before a whole message or tool result that
+   all mattered (the instruction to send the records, not the records). Pieces
+   it only needs as input (without them it stops or looks the data up again)
+   are listed as also required.
 8. Rerun the headline cause with a second replacement text, when removal left
    one, and flag it if the result doesn't hold.
 
