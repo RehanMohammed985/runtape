@@ -179,8 +179,8 @@ def test_budget_covers_both_steps_and_unchecked_fixes_are_marked(tmp_path):
         calls["n"] += 1
         return ops.simulated_model(req)
 
-    fr = fix(Trace.load(path), ev, model=FunctionModel(counted), match="db-reset|dropdb", cache_dir=None, budget=100)
-    assert calls["n"] <= 100
+    fr = fix(Trace.load(path), ev, model=FunctionModel(counted), match="db-reset|dropdb", cache_dir=None, budget=75)
+    assert calls["n"] <= 75
     assert fr.stopped and any(not c.complete for c in fr.candidates)
     from runtape import render
 

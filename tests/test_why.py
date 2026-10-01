@@ -456,10 +456,14 @@ def test_langchain_anthropic_requests_resend_in_anthropic_format(tmp_path):
 
     reply = AnthropicModel(FakeClient())(req)
     assert reply.text == "fine"
-    assert sent["system"] == "sys"
+    # reruns mark the system prompt and the end of the conversation for prompt caching
+    assert sent["system"] == [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}]
+    assert sent["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in str(req)  # the request itself (and its cache key) is unchanged
     assert sent["stop_sequences"] == ["END"] and "streaming" not in sent and "max_retries" not in sent
     assert sent["messages"][1]["content"][1] == {"type": "tool_use", "id": "t2", "name": "lookup", "input": {"order_id": "2"}}
     assert [b["tool_use_id"] for b in sent["messages"][2]["content"]] == ["t1", "t2"]  # merged into one user turn
+    assert sent["messages"][1]["content"][1].get("cache_control") is None
     system, converted = openai_to_anthropic(msgs)
     assert [m["role"] for m in converted] == ["user", "assistant", "user"]
 

@@ -6,7 +6,7 @@ from .why import why
 from .fix import fix, write_test
 from .replay import ReplayDiverged, Replayer, replay
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def record(path=None, **kwargs) -> Recorder:

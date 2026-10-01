@@ -102,12 +102,16 @@ runtape why <trace> <event>
 `last`. How it works:
 
 1. Rerun the recorded model call on the unchanged context to measure how often
-   the model makes the same decision.
+   the model makes the same decision. If it makes it less than half the time,
+   no piece of context could be shown to cause it, so `why` says so and stops.
 2. Remove each piece of the context (system prompt, messages, tool results)
    and rerun: 2 runs to screen, more where the decision changes.
 3. Confirm candidates with a one-sided Fisher exact test, corrected for every
-   variant tried, so randomness in the model isn't reported as a cause.
-4. Narrow each confirmed piece down to JSON items, paragraphs and sentences.
+   variant tried, so randomness in the model isn't reported as a cause. The
+   evidence is checked twice, after 5 and after 10 reruns, each with its own
+   share of the significance level, so clear effects stop early.
+4. Narrow each confirmed piece down to JSON items, paragraphs and sentences,
+   most suspicious first, stopping at the first one that holds.
 5. Look inside pieces whose removal changes nothing, for a cause hidden next
    to content that pushes the other way.
 6. Find causes that repeat or that are each enough on their own.
@@ -116,6 +120,10 @@ runtape why <trace> <event>
    also required.
 8. Rerun the headline cause with a second replacement text, when removal left
    one, and flag it if the result doesn't hold.
+
+Steps 5 and 6 are skipped when the main cause is already settled: one sentence
+or item the agent read, without which it takes a different action. `--full`
+runs them anyway, reusing the reruns already made.
 
 Only the selected model call is rerun. Your agent and its tools don't run
 again, so nothing is refunded, emailed or deleted twice.
@@ -170,6 +178,10 @@ told where the sentence is.
 - The cases are generated and each has a single planted cause. Causes spread
   across several pieces, or starting several steps before the decision, are
   not covered.
+
+These runs used the search as of 0.4. Re-scored from their saved replies with
+the faster search in 0.5, the headline cause is the same in every case the
+saved replies cover (33 of 34; the other needs a reply that was never saved).
 
 Results and traces are in `bench/results`, `bench/traces` and
 `bench/seed1/traces` (the new-seed run); the method is
@@ -228,18 +240,22 @@ output varies, so checks are made over several runs.
 
 ## Cost and limits
 
-- `why` makes typically 100 to 250 model calls for one decision, and `fix`
-  adds about 40. It is for
-  investigating a failure, not for monitoring every decision. On a small
-  hosted model that is typically cents; on a local model it is free. `--dry` ranks
+- Model calls: on the benchmark cases, `why` made a median of 96 model calls
+  for a decision the model makes consistently (132 with `--full`), and about
+  10 for one it doesn't, where it stops early. `fix` adds about 40. It is for
+  investigating a failure, not for monitoring every decision. `--dry` ranks
   suspects without model calls, `--budget` caps the calls, and replies are
   cached, so repeating a run is free.
-- Randomness: on a simulated model that ignores its context, false causes
-  appeared in 0 to 5 of 100 runs, matching the 5% significance level. A cause
-  that moves the decision rate from 90% to 10% was found in every run; 90% to
-  30%, in about 4 of 5. Decisions the model makes less than about 1 time in 5
-  are too rare to attribute; measure them with `odds` and test suspects with
-  `rerun --drop`.
+- What a call costs: with an API that returns several samples per request
+  (OpenAI, vLLM), the reruns of one context share a request and its input is
+  billed once, about 31 requests per decision on the benchmark. With
+  Anthropic, repeats read the context from the prompt cache at a tenth of the
+  input price. On a local model it is free.
+- Randomness: on a simulated model that ignores its context, no false cause
+  appeared in 100 runs. A cause that moves the decision rate from 90% to 10%
+  was found in 100 of 100 runs; 90% to 30%, in 96 of 100. Decisions the model
+  makes less than half the time can't be attributed; measure them with `odds`
+  and test suspects with `rerun --drop`.
 - Large contexts: pieces are tested top-down and only narrowed where they
   matter. By default at most 80 pieces are tested, ranked by shared wording
   with the decision, always including the system prompt, the task and the

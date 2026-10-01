@@ -137,18 +137,20 @@ def build_server(model_fn: str | None = None):
         return "\n".join(f"{sc:5.2f}  {seg.where}  {render.compact(seg.text, 120)}" for sc, seg in rows) or "No suspects."
 
     @mcp.tool()
-    def why(event: str, trace: str = "last", runs: int = 5, budget: int = 400) -> str:
+    def why(event: str, trace: str = "last", runs: int = 5, budget: int = 400, full: bool = False) -> str:
         """Prove which part of the context caused a decision (a tool call, model reply, or model call).
-        Re-runs that one decision with pieces removed; costs model calls (capped by budget), cached on disk."""
+        Re-runs that one decision with pieces removed; costs model calls (capped by budget), cached on disk.
+        full: keep searching after the main cause is settled (hidden causes, combinations)."""
         from .why import why as run_why
 
         t = _trace(trace)
-        rep = run_why(t, _event(t, event, decision=True), model=model(), runs=runs, budget=budget)
+        rep = run_why(t, _event(t, event, decision=True), model=model(), runs=runs, budget=budget,
+                      depth="full" if full else "quick")
         return _text(render.show_why(rep, show_all=True))
 
     @mcp.tool()
     def fix(event: str, trace: str = "last", runs: int = 10, budget: int = 600, match: str | None = None,
-            tool: str | None = None, write_test: str | None = None) -> str:
+            tool: str | None = None, write_test: str | None = None, full: bool = False) -> str:
         """Find what caused a decision, then check candidate fixes (system prompt rules, fixing the source) by
         rerunning the decision with each one. Reports which fixes hold. match/tool: what the decision is (see
         why). write_test: a path for a pytest file using the best passing fix. Costs model calls (capped by
@@ -160,7 +162,8 @@ def build_server(model_fn: str | None = None):
         ev = _event(t, event, decision=True)
         if write_test:
             check_for(make_target(t, ev, tool=tool, match=match))
-        fr = run_fix(t, ev, model=model(), runs=runs, budget=budget, match=match, tool=tool)
+        fr = run_fix(t, ev, model=model(), runs=runs, budget=budget, match=match, tool=tool,
+                     depth="full" if full else "quick")
         text = _text(render.show_fix(fr))
         if write_test:
             path = test_for(fr, t, ev, unique_path(write_test), runs=runs, model_fn=model_fn)

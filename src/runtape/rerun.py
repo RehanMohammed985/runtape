@@ -201,7 +201,41 @@ def openai_to_anthropic(messages: list) -> tuple[str | None, list]:
 Model = Callable[[dict], Reply]
 
 
+def _has_cache_control(obj: Any) -> bool:
+    if isinstance(obj, dict):
+        return "cache_control" in obj or any(_has_cache_control(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_cache_control(v) for v in obj)
+    return False
+
+
+def _mark(content: Any) -> Any:
+    """The content with a cache breakpoint on its last block."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}] if content else content
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        return content[:-1] + [{**content[-1], "cache_control": {"type": "ephemeral"}}]
+    return content
+
+
+def cache_breakpoints(system: Any, messages: list) -> tuple[Any, list]:
+    """Anthropic prompt caching for reruns: why sends the same context many times, so mark the system
+    prompt and the end of the conversation as cacheable. Repeats then read the context at a tenth of
+    the input price. Requests that already set their own breakpoints are left alone, and a context
+    shorter than the provider's minimum is simply not cached."""
+    if _has_cache_control(system) or _has_cache_control(messages) or not messages:
+        return system, messages
+    system = _mark(system) if system else system
+    messages = list(messages)
+    last = messages[-1]
+    if isinstance(last, dict) and "content" in last:
+        messages[-1] = {**last, "content": _mark(last["content"])}
+    return system, messages
+
+
 class AnthropicModel:
+    prefix_cache = True  # repeats of a request are cheaper once the first has been sent
+
     def __init__(self, client: Any = None, endpoint: str | None = None):
         self._client = client
         self.endpoint = endpoint  # created on first call, so no API key is needed until then
@@ -230,6 +264,7 @@ class AnthropicModel:
         else:
             kw = dict(req["params"])
         kw.setdefault("max_tokens", 1024)
+        system, messages = cache_breakpoints(system, messages)
         if system is not None:
             kw["system"] = system
         if req.get("tools"):
@@ -240,6 +275,8 @@ class AnthropicModel:
 
 
 class OpenAIChatModel:
+    prefix_cache = True  # OpenAI caches long repeated prefixes automatically
+
     def __init__(self, client: Any = None, endpoint: str | None = None):
         self._client = client
         self.endpoint = endpoint  # created on first call, so no API key is needed until then
@@ -261,18 +298,36 @@ class OpenAIChatModel:
                                  api_key=os.environ.get("OPENAI_API_KEY") or "local")
         return openai.OpenAI(max_retries=8)
 
-    def __call__(self, req: dict) -> Reply:
-        from .integrations import _OpenAIChat
-
+    def _kw(self, req: dict) -> dict:
         kw = _filter_params(req["params"], _OPENAI_PARAMS) if req.get("api") == "langchain" else dict(req["params"])
         if req.get("tools"):
             kw["tools"] = req["tools"]
-        resp = self.client.chat.completions.create(model=req["model"], messages=req["messages"], **kw)
+        return kw
+
+    def __call__(self, req: dict) -> Reply:
+        from .integrations import _OpenAIChat
+
+        resp = self.client.chat.completions.create(model=req["model"], messages=req["messages"], **self._kw(req))
         out = _OpenAIChat.response(resp)
         return Reply(out["text"], out["tool_calls"], out["stop_reason"], out["raw"])
 
+    def batch(self, req: dict, n: int) -> list[Reply]:
+        """n samples of one request in a single call (the API's `n`): the context is sent and billed
+        once. A server that ignores `n` returns fewer choices; the sampler notices and stops asking."""
+        from .integrations import _OpenAIChat
+
+        resp = self.client.chat.completions.create(model=req["model"], messages=req["messages"], n=n, **self._kw(req))
+        raw = to_jsonable(resp)
+        out = []
+        for choice in (raw.get("choices") or [])[:n]:
+            one = _OpenAIChat.response({**raw, "choices": [choice]})
+            out.append(Reply(one["text"], one["tool_calls"], one["stop_reason"], one["raw"]))
+        return out
+
 
 class OpenAIResponsesModel:
+    prefix_cache = True
+
     def __init__(self, client: Any = None, endpoint: str | None = None):
         self._client = client
         self.endpoint = endpoint  # created on first call, so no API key is needed until then
@@ -421,10 +476,13 @@ class Sampler:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.budget = budget
         self.workers = workers
-        self.calls = 0  # live calls made
+        self.calls = 0  # live samples (model calls) made
+        self.requests = 0  # live API requests; fewer than calls when several samples share one request
         self.hits = 0  # served from cache
         self._lock = threading.Lock()
         self.on_call = on_call
+        self.max_n = 20  # samples asked for in one request, where the API supports it
+        self.n_ok: bool | None = None  # does this backend honor `n`? unknown until the first try
 
     def _cache_path(self, req: dict, i: int) -> Path | None:
         if not self.cache_dir:
@@ -433,60 +491,139 @@ class Sampler:
         key = hashlib.sha256((self.model_id + "\n" + request_key(req)).encode()).hexdigest()
         return self.cache_dir / f"{key[:40]}-{i}.json"
 
-    def one(self, req: dict, i: int = 0) -> Reply:
+    def _read(self, req: dict, i: int) -> Reply | None:
         path = self._cache_path(req, i)
         if path and path.exists():
             try:
-                with self._lock:
-                    self.hits += 1
-                return Reply.from_any(json.loads(path.read_text()))
+                reply = Reply.from_any(json.loads(path.read_text()))
             except ValueError:
-                pass
+                return None
+            with self._lock:
+                self.hits += 1
+            return reply
+        return None
+
+    def _reserve(self, n: int) -> int:
+        """Take up to n samples from the budget; how many were granted (at least 1, or BudgetExceeded)."""
         with self._lock:
-            if self.budget is not None and self.calls >= self.budget:
-                raise BudgetExceeded(f"hit the budget of {self.budget} model calls")
-            self.calls += 1
+            if self.budget is not None:
+                n = min(n, self.budget - self.calls)
+                if n <= 0:
+                    raise BudgetExceeded(f"hit the budget of {self.budget} model calls")
+            self.calls += n
+            self.requests += 1
+        return n
+
+    def _call(self, req: dict) -> Reply:
         try:
-            reply = Reply.from_any(self.model(req))
+            return Reply.from_any(self.model(req))
         except Exception as e:
             if isinstance(self.model, FunctionModel):
                 raise RuntimeError(f"the model function raised {type(e).__name__}: {e} "
                                    "(it must handle any variant of the context, including removed content)") from e
             raise
-        if path:
-            path.write_text(json.dumps(to_jsonable(reply.to_dict()), ensure_ascii=False))
-        if self.on_call:
-            self.on_call()
-        return reply
+
+    def _live(self, req: dict, idx: list[int], got: list[Reply]) -> None:
+        """Fetch samples `idx` of one request, in as few API requests as the backend allows. Replies are
+        cached and appended to `got` as they arrive, so a budget stop keeps what was fetched."""
+        batch = getattr(self.model, "batch", None)
+        while len(got) < len(idx):
+            want = len(idx) - len(got)
+            if batch is not None and self.n_ok is not False and want > 1:
+                n = self._reserve(min(want, self.max_n))
+                try:
+                    replies = [Reply.from_any(r) for r in batch(req, n)][:n]
+                except Exception:
+                    if self.n_ok is None:  # the server may just not support `n`: fall back to one at a time
+                        with self._lock:
+                            self.n_ok, self.calls, self.requests = False, self.calls - n, self.requests - 1
+                        continue
+                    raise
+                if not replies:
+                    with self._lock:
+                        self.n_ok, self.calls, self.requests = False, self.calls - n, self.requests - 1
+                    continue
+                with self._lock:
+                    if len(replies) < n:  # `n` was ignored: count what came back, and stop asking for more
+                        self.n_ok, self.calls = False, self.calls - (n - len(replies))
+                    elif n > 1:
+                        self.n_ok = True
+            else:
+                self._reserve(1)
+                replies = [self._call(req)]
+            for reply in replies:
+                path = self._cache_path(req, idx[len(got)])
+                if path:
+                    path.write_text(json.dumps(to_jsonable(reply.to_dict()), ensure_ascii=False))
+                got.append(reply)
+                if self.on_call:
+                    self.on_call()
+
+    def one(self, req: dict, i: int = 0) -> Reply:
+        return self.many([(req, i)])[0]
 
     def many(self, jobs: Iterable[tuple[dict, int]]) -> list[Reply]:
-        """Run jobs in parallel, in order. If the budget runs out, the replies that did arrive
+        """Run jobs (request, sample index), in order. Cached samples are read from disk; the rest are
+        grouped by request, so a backend that supports `n` gets one API request per distinct context.
+        For a backend with prompt caching, the first sample of each context is sent before its repeats,
+        so the repeats find the context cached. If the budget runs out, the replies that did arrive
         (a leading run of them) are attached to the exception as .partial."""
         jobs = list(jobs)
-        out: list[Reply] = []
-        if self.workers <= 1 or len(jobs) <= 1:
+        res: list[Reply | None] = [None] * len(jobs)
+        groups: dict[str, tuple[dict, list[int]]] = {}
+        for j, (r, i) in enumerate(jobs):
+            hit = self._read(r, i)
+            if hit is not None:
+                res[j] = hit
+            else:
+                groups.setdefault(request_key(r), (r, []))[1].append(j)
+
+        batching = getattr(self.model, "batch", None) is not None and self.n_ok is not False
+        first: list[tuple[dict, list[int]]] = []
+        rest: list[tuple[dict, list[int]]] = []
+        for r, js in groups.values():
+            if batching:
+                first.append((r, js))
+            elif getattr(self.model, "prefix_cache", False) and len(js) > 1:
+                first.append((r, js[:1]))
+                rest.extend((r, [j]) for j in js[1:])
+            else:
+                first.extend((r, [j]) for j in js)
+
+        err: list[BudgetExceeded] = []
+
+        def run(unit: tuple[dict, list[int]]) -> None:
+            r, js = unit
+            got: list[Reply] = []
             try:
-                for r, i in jobs:
-                    out.append(self.one(r, i))
+                self._live(r, [jobs[j][1] for j in js], got)
             except BudgetExceeded as e:
-                e.partial = out
-                raise
-            return out
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            futures = [pool.submit(self.one, r, i) for r, i in jobs]
-            err = None
-            for f in futures:
-                try:
-                    res = f.result()
-                except BudgetExceeded as e:
-                    err = err or e
-                    continue
-                if err is None:
-                    out.append(res)
-            if err is not None:
-                err.partial = out
-                raise err
-            return out
+                err.append(e)
+            finally:
+                for j, reply in zip(js, got):
+                    res[j] = reply
+
+        for phase in (first, rest):
+            if not phase or err:
+                continue
+            if self.workers <= 1 or len(phase) <= 1:
+                for unit in phase:
+                    if err:
+                        break
+                    run(unit)
+            else:
+                with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                    list(pool.map(run, phase))
+        if err:
+            e = err[0]
+            lead: list[Reply] = []
+            for x in res:
+                if x is None:
+                    break
+                lead.append(x)
+            e.partial = lead
+            raise e
+        return res  # type: ignore[return-value]
 
     def samples(self, req: dict, k: int, start: int = 0) -> list[Reply]:
         return self.many((req, i) for i in range(start, start + k))

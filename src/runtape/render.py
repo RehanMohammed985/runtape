@@ -674,7 +674,11 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             out.append(Text(f"No effect when removed: {len(rest)} other pieces (--all to list).", style="dim"))
     if rep.untested and (rep.causes or rep.joint):
         out.append(Text(f"Not tested: {len(rep.untested)} least suspicious pieces (raise --max-pieces to include them).", style="dim"))
-    tail = f"{rep.calls} model calls, {rep.cache_hits} from cache."
+    if getattr(rep, "depth", "full") == "quick" and (rep.causes or rep.joint):
+        out.append(Text("Stopped at the main cause. --full also looks for causes hidden inside other pieces and for "
+                        "combinations of pieces (reruns made so far are reused).", style="dim"))
+    in_requests = f" in {rep.requests} requests" if 0 < getattr(rep, "requests", 0) < rep.calls else ""
+    tail = f"{rep.calls} model calls{in_requests}, {rep.cache_hits} from cache."
     if rep.stopped:
         tail += f" Stopped early: {rep.stopped}. Raise --budget to finish."
     out.append(Text(tail, style="dim"))

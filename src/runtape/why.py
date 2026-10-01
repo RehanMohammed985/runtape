@@ -300,9 +300,11 @@ class Report:
     joint: Cause | None = None  # set when only a combination of pieces flips the decision
     warnings: list[str] = field(default_factory=list)
     calls: int = 0
+    requests: int = 0  # API requests for those calls (fewer when the API returns several samples per request)
     cache_hits: int = 0
     k: int = 0
     stopped: str | None = None  # why the search ended early, if it did
+    depth: str = "full"  # "quick" when the search stopped at the main cause (no search for hidden causes or combinations)
     untested: list = field(default_factory=list)  # least suspicious pieces skipped by --max-pieces
     threshold: float = 0.5
     alpha: float = 0.05
@@ -388,6 +390,10 @@ class Why:
         joint_search: bool = True,
         fill: str | None = None,
         progress: Callable[[str], None] | None = None,
+        early_share: float = 0.25,
+        batch: int = 4,
+        quick_screen: int = 1,
+        depth: str = "quick",
     ):
         if k < 1:
             raise ValueError("runs must be at least 1")
@@ -401,6 +407,19 @@ class Why:
         self.screen = 1 if self.det else max(1, min(screen, self.k))
         self.confirm = 2 if self.det else max(confirm, self.k)
         self.alpha = alpha
+        # Confirmation looks at the evidence twice: once with the reruns screening already made, and
+        # again after more. Each look gets its own share of the significance level, so the overall
+        # false-positive rate is unchanged (Bonferroni over the two looks).
+        self.early_share = early_share
+        # when narrowing, test this many sub-pieces at a time, most suspicious first
+        self.batch = max(1, batch)
+        # reruns per piece when looking for hidden causes and combinations
+        self.quick_screen = quick_screen
+        # "quick" stops after the confirmed causes are narrowed down; "full" also looks for causes hidden
+        # inside pieces whose removal changed nothing, and for combinations
+        if depth not in ("quick", "full"):
+            raise ValueError("depth must be 'quick' or 'full'")
+        self.depth = depth
         self.threshold = threshold
         self.max_depth = max_depth
         self.max_causes = max_causes
@@ -445,33 +464,39 @@ class Why:
                 raise
             self._score(trial, replies)
 
-    def _trials(self, removals: list[list[Segment]]) -> list[Trial]:
+    def _trials(self, removals: list[list[Segment]], screen: int | None = None) -> list[Trial]:
         """Screen each removal with a few runs, then finish the ones that look like they matter."""
+        screen = screen or self.screen
         trials = [Trial(list(rm)) for rm in removals]
         self.tested += len(trials)
         reqs = [self._req(rm) for rm in removals]
         try:
-            first = self.sampler.many((r, i) for r in reqs for i in range(self.screen))
+            first = self.sampler.many((r, i) for r in reqs for i in range(screen))
         except BudgetExceeded as e:  # keep whatever was measured, then stop
             got = getattr(e, "partial", [])
             for n, t in enumerate(trials):
-                self._score(t, got[n * self.screen : (n + 1) * self.screen])
+                self._score(t, got[n * screen : (n + 1) * screen])
             e.trials = [t for t in trials if t.n]
             raise
         for n, t in enumerate(trials):
-            self._score(t, first[n * self.screen : (n + 1) * self.screen])
-        todo = [n for n, t in enumerate(trials) if t.kept < t.n and self.screen < self.k]
+            self._score(t, first[n * screen : (n + 1) * screen])
+        todo = [n for n, t in enumerate(trials) if t.kept < t.n and screen < self.k]
         if todo:
-            extra = self.k - self.screen
-            more = self.sampler.many((reqs[n], i) for n in todo for i in range(self.screen, self.k))
+            extra = self.k - screen
+            more = self.sampler.many((reqs[n], i) for n in todo for i in range(screen, self.k))
             for j, n in enumerate(todo):
                 self._score(trials[n], more[j * extra : (j + 1) * extra])
         return trials
 
     def _full(self, removal: list[Segment]) -> Trial:
+        """One removal in a combination search. These look for a set of pieces that together flip the
+        decision, so one rerun that keeps the decision rules a set out; one that changes it gets the
+        full number of reruns."""
         t = Trial(list(removal))
         self.tested += 1
-        self._extend(t, self.k)
+        self._extend(t, self.quick_screen)
+        if t.kept < t.n:
+            self._extend(t, self.k)
         return t
 
     def _candidate(self, t: Trial) -> bool:
@@ -484,10 +509,18 @@ class Why:
             return False
         t.family = max(1, self.tested, family or 0)
         self._extend(self.base_trial, self.confirm)
-        self._extend(t, self.confirm)
         if self.det:
+            self._extend(t, self.confirm)
             return t.kept == 0 and self.base_trial.kept == self.base_trial.n
         level = self.alpha / t.family
+        early = self.early_share * level
+        if t.n < self.confirm and early > 0:
+            # a clear effect is already significant on the reruns screening made: stop here
+            t.p = fisher_less(t.kept, t.n, self.base_trial.kept, self.base_trial.n)
+            if t.p <= early and self._candidate(t):
+                return True
+        level -= early
+        self._extend(t, self.confirm)
         t.p = fisher_less(t.kept, t.n, self.base_trial.kept, self.base_trial.n)
         if t.p > level and t.p < self.alpha and self._candidate(t):
             # close call: double the evidence once before deciding
@@ -578,6 +611,7 @@ class Why:
         except BudgetExceeded as e:
             rep.stopped = str(e)
         rep.calls = self.sampler.calls
+        rep.requests = self.sampler.requests
         rep.cache_hits = self.sampler.hits
         return rep
 
@@ -595,12 +629,19 @@ class Why:
                 "compare that with: runtape rerun <trace> <event> --drop <event> --runs 20."
             )
             return
-        if self.base < 0.6:
-            rep.warnings.append(
-                f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} reruns of "
-                "the same context. Causes need stronger evidence to show up; raise --runs, or test a suspect "
-                "directly with runtape rerun <trace> <event> --drop <event> --runs 20."
-            )
+        if self.base < self.threshold and not self.det:
+            # No removal can lower a rate this low by the threshold, so nothing could be confirmed. Measure
+            # the rate once more before giving up: a few unlucky reruns shouldn't end the search.
+            self._extend(self.base_trial, self.confirm)
+            if self.base < self.threshold:
+                rep.warnings.append(
+                    f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} "
+                    "reruns of the same context, too rarely for any piece of context to be shown to cause it, so "
+                    "the search stopped here. To test a suspect directly, compare runtape odds <trace> <event> "
+                    "--runs 20 with runtape rerun <trace> <event> --drop <event> --runs 20."
+                )
+                return
+        self._warn_unstable(rep)
         all_segs = extract(self.req, self.trace, self.target.request_id)
         if not all_segs:
             rep.warnings.append("No removable context found in this request.")
@@ -641,14 +682,25 @@ class Why:
             drilled += 1
             self.progress(f"narrowing down {c.top.removed[0].where}")
             c.chain = self._drill(c.top, [])
+            if self.depth == "quick" and self._settled(c):
+                break  # explained by one part the agent read: lower-ranked causes stay as found
 
         # A piece can hold the cause and evidence against it at once (a search result with a stale
         # doc next to the real policy). Removing the whole piece then changes nothing, so look inside
         # the most suspicious pieces that didn't flip.
         others = [t for t in rep.trials if not any(t is x for x in rep.confirmed) and t.removed[0].children()]
+        if self.depth == "quick" and any(self._settled(c) for c in rep.causes):
+            # The decision is already explained by one sentence or item the agent read, without which it does
+            # something else: report that now. Otherwise (the cause only makes it stop or answer, or couldn't be
+            # narrowed down) the hidden-cause and combination searches run as in a full search.
+            rep.depth = "quick"
+            self._finish(rep)
+            return
         for t in others[: self.expand]:
             self.progress(f"looking inside {t.removed[0].where}")
-            chain = self._drill(t, [])
+            # a hidden cause is one strong enough to flip the decision on its own once its neighbor's
+            # counter-evidence is gone, so one rerun per part is enough to spot it
+            chain = self._drill(t, [], self.quick_screen)
             if len(chain) > 1:
                 rep.causes.append(Cause(chain, masked=True))
         rep.unexpanded = max(0, len(others) - self.expand)
@@ -695,8 +747,33 @@ class Why:
                 if joint is not None:
                     rep.joint = Cause([joint])
 
+        self._finish(rep)
+
+    def _warn_unstable(self, rep: Report) -> None:
+        if self.base < 0.6 and not self.det and not any(w.startswith("Unstable decision") for w in rep.warnings):
+            rep.warnings.append(
+                f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} reruns of "
+                "the same context. Causes need stronger evidence to show up; raise --runs, or test a suspect "
+                "directly with runtape rerun <trace> <event> --drop <event> --runs 20."
+            )
+
+    def _explains(self, c: Cause) -> bool:
+        """Could this cause be the headline on its own: content the agent read or wrote (not the user's
+        request or the system prompt), whose removal changes the decision rather than just making the
+        agent fetch it again."""
+        t = c.refined or c.finest
+        return self._alt_class(t) != 2 and not all(s.kind in ("user", "system") for s in t.removed)
+
+    def _settled(self, c: Cause) -> bool:
+        """A cause that answers the question on its own: one part of what the agent read, narrowed as far as
+        it goes, without which the agent takes a different action."""
+        return self._explains(c) and self._alt_class(c.finest) == 0 and not c.finest.removed[-1].children()
+
+    def _finish(self, rep: Report) -> None:
+        self._warn_unstable(rep)  # the baseline may have been measured more precisely during the search
         # The headline is the most telling cause. A piece whose removal only makes the agent fetch
         # the same data again is never the headline: it is input, not the reason for the choice.
+        rep.causes.sort(key=self._rank_key)
         allc = rep.causes + ([rep.joint] if rep.joint else [])
         eligible = [c for c in allc if self._alt_class(c.refined or c.finest) != 2]
         best = min(eligible, key=self._rank_key) if eligible else None
@@ -704,10 +781,25 @@ class Why:
             c.kind = "decisive" if (c is best or self._alt_class(c.refined or c.finest) == 0) else "prerequisite"
         self._warn_budget = False
         for c in [c for c in allc if c.kind == "decisive"][:3]:
+            self._top_up(c)
             self._recheck(c)
         if self._warn_budget:
             rep.warnings.append("The budget ran out before every cause was rechecked with a different replacement "
                                 "text. Raise --budget to finish; completed reruns are cached.")
+
+    def _top_up(self, c: Cause) -> None:
+        """A cause confirmed early, on few reruns, is reported with the full number, so the evidence
+        shown for the main causes is as strong as before. Intermediate steps keep their early stop."""
+        if self.det:
+            return
+        for t in {id(x): x for x in (c.finest, c.refined) if x is not None}.values():
+            if t.n < self.confirm and t.p is not None:
+                try:
+                    self._extend(t, self.confirm)
+                except BudgetExceeded:
+                    self._warn_budget = True
+                    return
+                t.p = fisher_less(t.kept, t.n, self.base_trial.kept, self.base_trial.n)
 
     def _recheck(self, c: Cause) -> None:
         """Removing a whole message or tool result leaves replacement text in its place, and that text
@@ -727,7 +819,7 @@ class Why:
         r.family = 1
         c.recheck = r
 
-    def _drill(self, top: Trial, held: list[Segment]) -> list[Trial]:
+    def _drill(self, top: Trial, held: list[Segment], screen: int | None = None) -> list[Trial]:
         """Follow a cause down into smaller and smaller pieces while they still flip the decision."""
         chain = [top]
         cur = top
@@ -735,11 +827,16 @@ class Why:
             kids = self._rank(cur.removed[-1].children())
             if not kids:
                 break
-            trials = self._trials([held + [k] for k in kids])
+            # Most suspicious parts first, a few at a time; stop at the first one confirmed. The search only
+            # follows one part down, so testing the rest after a confirmed one would change nothing.
             nxt = None
-            for t in sorted((t for t in trials if self._candidate(t)), key=lambda t: -t.effect(self.base)):
-                if self._confirm(t, len(kids)):
-                    nxt = t
+            for start in range(0, len(kids), self.batch):
+                trials = self._trials([held + [k] for k in kids[start : start + self.batch]], screen)
+                for t in sorted((t for t in trials if self._candidate(t)), key=lambda t: -t.effect(self.base)):
+                    if self._confirm(t, len(kids)):
+                        nxt = t
+                        break
+                if nxt is not None:
                     break
             if nxt is None:
                 break
@@ -856,6 +953,7 @@ def why(
     fill: str | None = None,
     progress: Callable[[str], None] | None = None,
     on_call: Callable[[], None] | None = None,
+    depth: str = "quick",
 ) -> Report:
     """Explain a decision in a trace. See module docstring."""
     from .rerun import FunctionModel
@@ -880,12 +978,13 @@ def why(
         else:
             target.judge = llm_judge(sampler, req)
     rep = Why(trace, target, sampler, k=runs, screen=screen, confirm=confirm, threshold=threshold, alpha=alpha,
-              max_pieces=max_pieces, expand=expand, fill=fill, progress=progress).run()
+              max_pieces=max_pieces, expand=expand, fill=fill, progress=progress, depth=depth).run()
     rep.warnings[:0] = notes
     return rep
 
 
-def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, max_pieces: int | None = 80) -> tuple[int, int]:
+def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, max_pieces: int | None = 80,
+                   full: bool = False) -> tuple[int, int]:
     """(likely, worst case) number of model calls a why run will make."""
     rid, _ = request_for(trace, event_id)
     req = build_request(trace, rid)
@@ -894,8 +993,10 @@ def estimate_calls(trace: Trace, event_id: int, runs: int = 5, screen: int = 2, 
         n = min(n, max_pieces)
     if is_deterministic(req):
         return 2 + n + 12 + 2, 2 + n * 2 + 40 + 6
-    # baseline, screening, confirmations and narrowing, plus rechecking the headline with other replacement text
-    return max(runs, 10) + n * screen + 4 * 10 + 3 * runs * 3 + 10, 20 + n * runs + 60 * runs + 30
+    # baseline, screening each piece, confirming and narrowing down the main cause, and rechecking it; a full
+    # search also looks inside pieces that changed nothing and tries combinations (measured on bench/)
+    likely = max(runs, 10) + n * screen + 70 + (40 if full else 0)
+    return likely, 20 + n * runs + 60 * runs + 30
 
 
 def suspects(trace: Trace, event_id: int, top: int = 10) -> list[tuple[float, Segment]]:

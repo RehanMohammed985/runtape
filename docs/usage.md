@@ -50,6 +50,7 @@ last call to that tool), or `last` (the last model response).
 | `--fill TEXT` | replacement for a removed message or tool result: `marker` (default), `empty`, or any text |
 | `--max-pieces N` | test at most N pieces, most suspicious first (default 80) |
 | `--expand N` | look inside N pieces for masked causes (default 6) |
+| `--full` | keep searching after the main cause is settled: hidden causes and combinations |
 | `--all` | list every piece tested |
 | `--json FILE` | also write the report as JSON |
 | `--model-fn module:function` | rerun with a Python function instead of the recorded model |
@@ -76,7 +77,7 @@ model_name=..., runs=...)` returns a distribution with `never_calls(tool)`,
 ## runtape fix and runtape test
 
 ```
-runtape fix <trace> <event> [--runs 10] [--write-test PATH] [--match REGEX] [--tool NAME] [--budget 600]
+runtape fix <trace> <event> [--runs 10] [--write-test PATH] [--match REGEX] [--tool NAME] [--budget 600] [--full]
 runtape test <trace> <event> [--out PATH] [--add-system TEXT | --add-system-file F] [--runs 10]
 ```
 

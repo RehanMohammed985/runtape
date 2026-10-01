@@ -126,7 +126,7 @@ def _parse_replace(items: list[str] | None) -> dict[str, str]:
 
 def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
             model_fn=None, budget=400, cache=True, yes=False, show_all=False, json_out=None,
-            max_pieces=80, dry=False, expand=6, fill=None) -> int:
+            max_pieces=80, dry=False, expand=6, fill=None, full=False) -> int:
     from .rerun import build_request, request_for
     from .why import estimate_calls, why
 
@@ -145,12 +145,12 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
             row.append(seg.where, style="bold")
             row.append("  " + render.compact(seg.text, 80))
             c.print(row)
-        likely, _ = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces)
+        likely, _ = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces, full=full)
         c.print(Text(f"This is a guess. Run without --dry to test them (about {likely} model calls).", style="dim"))
         return 0
     model = _model(model_fn)
     rid, _ = request_for(trace, event)
-    likely, worst = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces)
+    likely, worst = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces, full=full)
     live = model is None
     if live:
         req = build_request(trace, rid)
@@ -177,7 +177,7 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
 
         rep = why(trace, event, model=model, runs=runs, tool=tool, match=match, exact_args=exact_args,
                   budget=budget, cache_dir=".runtape/cache" if cache else None, max_pieces=max_pieces, expand=expand,
-                  fill=fill, progress=progress, on_call=on_call)
+                  fill=fill, progress=progress, on_call=on_call, depth="full" if full else "quick")
     c.print(render.show_why(rep, show_all=show_all))
     if json_out:
         Path(json_out).write_text(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
@@ -204,7 +204,7 @@ def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replac
 
 
 def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=None, model_fn=None, budget=600,
-            cache=True, yes=False, write_test=None, fill=None) -> int:
+            cache=True, yes=False, write_test=None, fill=None, full=False) -> int:
     from .fix import check_for, fix, test_for, unique_path
     from .why import make_target
 
@@ -214,7 +214,7 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
     if model is None and not yes and sys.stdin.isatty():
         from .why import estimate_calls
 
-        likely, _ = estimate_calls(trace, event)
+        likely, _ = estimate_calls(trace, event, full=full)
         c.print(Text(f"This finds the cause (about {likely} model calls), then checks up to 4 fixes with {runs} "
                      f"reruns each, {budget} calls at most. Replies are cached.", style="dim"))
         if input("Continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
@@ -228,7 +228,7 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
             counter["n"] += 1
 
         fr = fix(trace, event, model=model, runs=runs, budget=budget, cache_dir=".runtape/cache" if cache else None,
-                 progress=progress, tool=tool, match=match, fill=fill, on_call=on_call)
+                 progress=progress, tool=tool, match=match, fill=fill, on_call=on_call, depth="full" if full else "quick")
     c.print(render.show_fix(fr))
     if write_test:
         path = test_for(fr, trace, event, unique_path(write_test), runs=runs, model_fn=model_fn)
@@ -633,6 +633,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="list every piece tested")
     s.add_argument("--max-pieces", type=int, default=80, help="test at most this many pieces, most suspicious first (default 80)")
     s.add_argument("--expand", type=int, default=6, help="look inside this many pieces for masked causes (default 6)")
+    s.add_argument("--full", action="store_true", help="keep searching after the main cause is settled: causes hidden "
+                   "inside other pieces, and combinations of pieces")
     s.add_argument("--json", dest="json_out", help="also write the report as JSON")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
     s.add_argument("--dry", action="store_true", help="just rank suspects by shared wording, no model calls")
@@ -659,6 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--budget", type=int, default=600, help="max model calls (default 600)")
     s.add_argument("--fill", help="replacement text for removed content (see runtape why --help)")
     s.add_argument("--write-test", metavar="PATH", help="write a pytest regression test using the best verified fix")
+    s.add_argument("--full", action="store_true", help="run the full cause search (see runtape why --help)")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
 
     s = sub.add_parser("test", help="write a pytest regression test for a recorded decision")
@@ -751,7 +754,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
                            json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry, expand=args.expand,
-                           fill=args.fill)
+                           fill=args.fill, full=args.full)
         elif cmd_name == "rerun":
             return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
@@ -759,7 +762,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         elif cmd_name == "fix":
             return run_fix(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, model_fn=args.model_fn, budget=args.budget, cache=not args.no_cache,
-                           yes=args.yes, write_test=args.write_test, fill=args.fill)
+                           yes=args.yes, write_test=args.write_test, fill=args.fill, full=args.full)
         elif cmd_name == "test":
             add = Path(args.add_system_file).read_text() if args.add_system_file else args.add_system
             return run_test(c, trace, resolve_decision(trace, args.event), out=args.out, tool=args.tool,
