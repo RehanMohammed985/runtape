@@ -102,8 +102,11 @@ runtape why <trace> <event>
 `last`. How it works:
 
 1. Rerun the recorded model call on the unchanged context to measure how often
-   the model makes the same decision. If it makes it less than half the time,
-   no piece of context could be shown to cause it, so `why` says so and stops.
+   the model makes the same decision. If it makes it in under 60% of reruns, it
+   is intermittent (an attack that works one run in three is still an attack):
+   the rate is measured on 30 reruns, and a piece counts as a cause when
+   removing it at least halves the rate, confirmed on 30 reruns. Under 15%,
+   `why` says the decision is too rare to attribute and stops.
 2. Remove each piece of the context (system prompt, messages, tool results)
    and rerun: 2 runs to screen, more where the decision changes.
 3. Confirm candidates with a one-sided Fisher exact test, corrected for every
@@ -256,8 +259,11 @@ output varies, so checks are made over several runs.
 - Randomness: on a simulated model that ignores its context, no false cause
   appeared in 100 runs. A cause that moves the decision rate from 90% to 10%
   was found in 100 of 100 runs; 90% to 30%, in 96 of 100. Decisions the model
-  makes less than half the time can't be attributed; measure them with `odds`
-  and test suspects with `rerun --drop`.
+  makes 15-60% of the time are searched on 30 reruns per check: a cause
+  behind a decision made 35% of the time was found in 20 of 20 seeds (about
+  200 model calls each), and noise at 33% gave no cause in 20 of 20. Under 15%
+  they can't be attributed; measure
+  them with `odds` and test suspects with `rerun --drop`.
 - Large contexts: pieces are tested top-down and only narrowed where they
   matter. By default at most 80 pieces are tested, ranked by shared wording
   with the decision, always including the system prompt, the task and the

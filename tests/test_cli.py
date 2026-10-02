@@ -219,7 +219,7 @@ def test_cli_why_json_and_cache(demo, tmp_path):
     cause = data["causes"][0]
     assert cause["kind"] == "decisive" and cause["masked"] is True
     assert cause["chain"][-1]["removed"][0]["origin"] == 9
-    assert data["baseline"] == {"happens": 10, "runs": 10}
+    assert data["baseline"] == {"happens": 10, "runs": 10, "intermittent": False}
 
 
 def test_cli_rerun_and_odds(demo):

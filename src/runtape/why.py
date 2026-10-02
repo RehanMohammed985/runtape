@@ -312,6 +312,9 @@ class Report:
     confirmed: list = field(default_factory=list)  # every trial that passed the significance test
     unexpanded: int = 0  # pieces with parts that were not looked inside for masked causes
     fill: str = FILLS["marker"]
+    # the model makes the decision only some of the time: causes are pieces without which it happens at
+    # most half as often, confirmed on more reruns (threshold is then that share of the rate)
+    intermittent: bool = False
 
     @property
     def base(self) -> float:
@@ -341,7 +344,7 @@ class Report:
         return {
             "decision": {"request": self.target.request_id, "response": self.target.response_id,
                          "outcome": self.target.describe()},
-            "baseline": {"happens": self.baseline.kept, "runs": self.baseline.n},
+            "baseline": {"happens": self.baseline.kept, "runs": self.baseline.n, "intermittent": self.intermittent},
             "causes": [{"kind": c.kind, "masked": c.masked, "chain": [trial(t) for t in c.chain],
                         "together": trial(c.refined) if c.refined else None,
                         "recheck": {"fill": c.recheck.fill, "still_happens": c.recheck.kept, "runs": c.recheck.n,
@@ -394,6 +397,8 @@ class Why:
         batch: int = 4,
         quick_screen: int = 1,
         depth: str = "quick",
+        intermittent_confirm: int = 30,
+        intermittent_min: float = 0.15,
     ):
         if k < 1:
             raise ValueError("runs must be at least 1")
@@ -421,6 +426,11 @@ class Why:
             raise ValueError("depth must be 'quick' or 'full'")
         self.depth = depth
         self.threshold = threshold
+        # a decision made in under 60% of the reruns, but at least this often, is searched as an intermittent one
+        self.intermittent_confirm = max(intermittent_confirm, confirm)
+        self.intermittent_min = intermittent_min
+        self.intermittent_below = 0.6  # where a decision counts as unstable
+        self.intermittent = False
         self.max_depth = max_depth
         self.max_causes = max_causes
         self.expand = expand
@@ -633,18 +643,34 @@ class Why:
                 "compare that with: runtape rerun <trace> <event> --drop <event> --runs 20."
             )
             return
-        if self.base < self.threshold and not self.det:
-            # No removal can lower a rate this low by the threshold, so nothing could be confirmed. Measure
-            # the rate once more before giving up: a few unlucky reruns shouldn't end the search.
+        if self.base < self.intermittent_below and not self.det:
+            # Measure the rate once more first: a few unlucky reruns shouldn't change how the search runs.
             self._extend(self.base_trial, self.confirm)
-            if self.base < self.threshold:
+            if self.base < self.intermittent_below:
+                # A decision the model makes only some of the time (an attack that works one run in three is
+                # still an attack): intermittent. A cause can't lower its rate by the usual margin, but it can make it stop
+                # happening: measure the rate on more reruns, and count a piece as a cause when removing it
+                # at least halves the rate, confirmed on as many reruns, with the same correction for every
+                # piece compared.
+                self._extend(self.base_trial, self.intermittent_confirm)
+                if self.base < self.intermittent_min:
+                    rep.warnings.append(
+                        f"Unstable decision: the model only repeats it in {self.base_trial.kept}/"
+                        f"{self.base_trial.n} reruns of the same context, too rarely for any piece of context to "
+                        "be shown to cause it, so the search stopped here. To test a suspect directly, compare "
+                        "runtape odds <trace> <event> --runs 50 with runtape rerun <trace> <event> --drop <event> "
+                        "--runs 50."
+                    )
+                    return
+            if self.base < self.intermittent_below:
+                self.intermittent = rep.intermittent = True
+                self.threshold = rep.threshold = self.threshold * self.base
+                self.confirm = self.intermittent_confirm
                 rep.warnings.append(
-                    f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} "
-                    "reruns of the same context, too rarely for any piece of context to be shown to cause it, so "
-                    "the search stopped here. To test a suspect directly, compare runtape odds <trace> <event> "
-                    "--runs 20 with runtape rerun <trace> <event> --drop <event> --runs 20."
+                    f"Intermittent decision: the model makes it in {self.base_trial.kept}/{self.base_trial.n} reruns "
+                    "of the same context. The causes below are what it depends on: without each, it happens at most "
+                    f"half as often, confirmed on {self.confirm} reruns."
                 )
-                return
         self._warn_unstable(rep)
         all_segs = extract(self.req, self.trace, self.target.request_id)
         if not all_segs:
@@ -754,6 +780,8 @@ class Why:
         self._finish(rep)
 
     def _warn_unstable(self, rep: Report) -> None:
+        if self.intermittent:
+            return  # said already, with what the causes mean
         if self.base < 0.6 and not self.det and not any(w.startswith("Unstable decision") for w in rep.warnings):
             rep.warnings.append(
                 f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} reruns of "

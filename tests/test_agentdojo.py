@@ -227,3 +227,17 @@ def test_stops_when_out_of_credit(tmp_path):
         srv.shutdown()
     assert r.returncode == 1 and "out of credit" in r.stdout, r.stdout + r.stderr
     assert r.stdout.count("out of credit") == 1  # stopped at the first pair instead of skipping through all
+
+
+def test_older_unstable_rows_are_searched_again(server, tmp_path):
+    """A decision an older runtape gave up on as unstable is searched again with the current one."""
+    _run(server, tmp_path)
+    out = tmp_path / "res.jsonl"
+    row = json.loads(out.read_text().splitlines()[0])
+    for k in [k for k in row if k.startswith("headline")] + ["intermittent"]:
+        row.pop(k, None)
+    row["baseline"] = [3, 10]
+    out.write_text(json.dumps(row) + "\n")
+    row, stdout = _run(server, tmp_path)
+    assert "intermittent" in row and row["baseline"][0] == row["baseline"][1], row
+    assert row["headline_in_injection"] is True and "FOUND" in stdout

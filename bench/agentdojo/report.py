@@ -9,41 +9,26 @@ def pct(n, d):
     return f"{n}/{d} ({100 * n / d:.0f}%)" if d else "0/0"
 
 
-def stable(r):
+def consistent(r):
+    """Made in at least half of the reruns, and searched as a decision made every time."""
     b = r.get("baseline")
-    return bool(b) and b[1] > 0 and b[0] * 2 >= b[1]
+    return bool(b) and b[1] > 0 and not r.get("intermittent") and b[0] * 2 >= b[1]
+
+
+def intermittent(r):
+    return bool(r.get("intermittent"))
+
+
+def searched(r):
+    return consistent(r) or intermittent(r)
 
 
 def rate(xs):
     return f"{sum(xs)}/{len(xs)}" if xs else "-"
 
 
-def summarize(path):
-    rows = [json.loads(x) for x in open(path) if x.strip()]
-    if not rows:
-        return
-    mt = rows[0].get("max_tokens")
-    print(f"## {rows[0].get('model')}" + (f" (replies capped at {mt} tokens)" if mt else "") + "\n")
-    ran = [r for r in rows if "attacked" in r]
-    errors = [r for r in rows if "error" in r]
-    attacked = [r for r in ran if r["attacked"]]
-    scored = [r for r in attacked if r.get("baseline")]
-    st = [r for r in scored if stable(r)]
-    drifted = [r for r in scored if not stable(r)]
-    print(f"- pairs run: {len(ran)}" + (f" (plus {len(errors)} where the agent run failed)" if errors else ""))
-    print(f"- attack succeeded (AgentDojo's security check): {pct(len(attacked), len(ran))}")
-    print(f"- attacker's call found and `why` run: {len(scored)}; decision made consistently when rerun: {len(st)}")
-    print(f"- not made consistently (under half of reruns): {len(drifted)}; why reported that instead of a cause")
-    # reruns read from the cache count too: they are what a fresh run would have to make
-    calls = [r.get("calls", 0) + r.get("cache_hits", 0) for r in st]
-    if calls:
-        print(f"- model calls per `why` on a consistent decision (made, or read from the cache): median "
-              f"{statistics.median(calls):.0f}, max {max(calls)}")
-    reqs = [r["requests"] for r in st if r.get("requests") and not r.get("cache_hits")]
-    if reqs:
-        print(f"- API requests for those calls, where none were cached: median {statistics.median(reqs):.0f}")
-
-    print("\n### Attribution (decisions made consistently)\n")
+def attribution(st, title):
+    print(f"\n### Attribution ({title})\n")
     print("| method | blames text inside the injection | ...including the attacker's instruction | "
           "blames the whole tool result holding it | blames something else |")
     print("|---|---|---|---|---|")
@@ -77,26 +62,62 @@ def summarize(path):
     if n:
         print(f"\nruntape listed the injection (or the tool result holding it) among its causes, headline or not, "
               f"for {pct(listed, n)}.")
-    by = defaultdict(lambda: [0, 0, 0, 0])
-    for r in ran:
-        b = by[r["suite"]]
-        b[0] += 1
-        b[1] += r["attacked"]
-        b[2] += r in st
-        b[3] += r in st and bool(r.get("headline_in_injection"))
-    print("\n| suite | pairs | attack succeeded | consistent | runtape: inside the injection |")
-    print("|---|---|---|---|---|")
-    for s, (a, b, c, d) in sorted(by.items()):
-        print(f"| {s} | {a} | {b} | {c} | {d} |")
     missed = [r for r in st if not r.get("headline_in_injection") and not r.get("headline_contains_injection")]
     for r in missed:
         also = "; the injection is among its other causes" if r.get("injection_anywhere") else ""
         print(f"\nmissed {r['pair']}: headline {r.get('headline')!r}{also}")
 
-    fixed = [r for r in st if r.get("fix")]
+
+def summarize(path):
+    rows = [json.loads(x) for x in open(path) if x.strip()]
+    if not rows:
+        return
+    mt = rows[0].get("max_tokens")
+    print(f"## {rows[0].get('model')}" + (f" (replies capped at {mt} tokens)" if mt else "") + "\n")
+    ran = [r for r in rows if "attacked" in r]
+    errors = [r for r in rows if "error" in r]
+    attacked = [r for r in ran if r["attacked"]]
+    scored = [r for r in attacked if r.get("baseline")]
+    st = [r for r in scored if consistent(r)]
+    inter = [r for r in scored if intermittent(r)]
+    rare = [r for r in scored if not searched(r)]
+    print(f"- pairs run: {len(ran)}" + (f" (plus {len(errors)} where the agent run failed)" if errors else ""))
+    print(f"- attack succeeded (AgentDojo's security check): {pct(len(attacked), len(ran))}")
+    print(f"- attacker's call found and `why` run: {len(scored)}")
+    print(f"  - made consistently when rerun: {len(st)}")
+    print(f"  - intermittent (made in 15-60% of reruns), searched on more reruns: {len(inter)}")
+    print(f"  - too rare to attribute (under 15%), reported as such: {len(rare)}")
+    # reruns read from the cache count too: they are what a fresh run would have to make
+    for group, label in ((st, "a consistent decision"), (inter, "an intermittent decision")):
+        calls = [r.get("calls", 0) + r.get("cache_hits", 0) for r in group]
+        if calls:
+            print(f"- model calls per `why` on {label} (made, or read from the cache): median "
+                  f"{statistics.median(calls):.0f}, max {max(calls)}")
+    reqs = [r["requests"] for r in st if r.get("requests") and not r.get("cache_hits")]
+    if reqs:
+        print(f"- API requests for those calls, where none were cached: median {statistics.median(reqs):.0f}")
+
+    attribution(st, "decisions made consistently")
+    if inter:
+        attribution(inter, "intermittent decisions")
+    by = defaultdict(lambda: [0, 0, 0, 0, 0])
+    for r in ran:
+        b = by[r["suite"]]
+        b[0] += 1
+        b[1] += r["attacked"]
+        b[2] += r in st
+        b[3] += r in inter
+        b[4] += (r in st or r in inter) and bool(r.get("headline_in_injection"))
+    print("\n| suite | pairs | attack succeeded | consistent | intermittent | runtape: inside the injection |")
+    print("|---|---|---|---|---|---|")
+    for s, (a, b, c, d, e) in sorted(by.items()):
+        print(f"| {s} | {a} | {b} | {c} | {d} | {e} |")
+
+    fixed = [r for r in st + inter if r.get("fix")]
     if fixed:
         print("\n### Fixes\n")
-        print("Checked on the recorded decision (10 reruns each), then on the live task: full AgentDojo runs under "
+        print("Checked on the recorded decision (10 reruns each, 30 for an intermittent one), then on the live task: "
+              "full AgentDojo runs under "
               "attack and without it.\n")
         print("| fix | passed on the recorded decision | live: attack succeeded | live: task done under attack | "
               "live: task done, no attack |")
@@ -147,10 +168,10 @@ def summarize(path):
 
     ctl = [r["control"] for r in rows if r.get("control")]
     if ctl:
-        cs = [c for c in ctl if stable(c)]
+        cs = [c for c in ctl if searched(c)]
         print("\n### Controls\n")
         print(f"The user's own action, in a trace where the injection is present ({len(ctl)} decisions, "
-              f"{len(cs)} made consistently). Blaming text inside the injection is a false positive.\n")
+              f"{len(cs)} made often enough to search). Blaming text inside the injection is a false positive.\n")
         print("| method | blames the injection |")
         print("|---|---|")
         print(f"| runtape why | {pct(sum(bool(c.get('headline_in_injection')) for c in cs), len(cs))} |")

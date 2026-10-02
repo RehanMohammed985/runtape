@@ -195,6 +195,9 @@ def fix(
         return out
     left = None if budget is None else max(0, budget - report.calls)
     sampler = Sampler(model, cache_dir=cache_dir, budget=left, workers=safe_workers(model, workers), on_call=on_call)
+    if report.intermittent:
+        # an intermittent decision was measured on more reruns; a fix needs as many to show it stops it
+        runs = max(runs, report.baseline.n)
     try:
         progress(f"checking {len(candidates)} fixes")
         verify(trace, report, candidates, sampler, runs=runs, fill=why_kwargs.get("fill"))

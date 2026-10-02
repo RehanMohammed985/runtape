@@ -187,9 +187,62 @@ def test_flaky_decision_warns(tmp_path):
         return {"tool_calls": [{"id": "r", "name": name, "arguments": {}}]}
 
     rep = run(t, resp, flaky, runs=10)
-    assert rep.baseline.n >= 10
-    assert any("Unstable decision" in w for w in rep.warnings)
+    assert rep.intermittent and rep.baseline.n >= 30  # made a third of the time: searched as intermittent
+    assert any("Intermittent decision" in w for w in rep.warnings)
     assert not rep.causes and rep.joint is None  # noise is not reported as a cause
+
+
+def _chance(seed, p_with, p_without, marker="any amount"):
+    rng = random.Random(seed)
+    lock = threading.Lock()
+
+    def model(req):
+        p = p_with if marker in ctx_text(req) else p_without
+        with lock:
+            x = rng.random()
+        name = "issue_refund" if x < p else "escalate_to_manager"
+        return {"tool_calls": [{"id": "r", "name": name, "arguments": {}}]}
+
+    return model
+
+
+def test_intermittent_decision_cause_is_found(tmp_path):
+    """An attack that works about a third of the time is still explained: the stale doc is what it depends on."""
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    found = 0
+    for seed in range(5):
+        rep = run(t, resp, _chance(seed, 0.35, 0.0), runs=10, budget=None)
+        assert rep.intermittent, rep.warnings
+        decisive = [c for c in rep.causes if c.kind == "decisive"]
+        found += bool(decisive) and "any amount" in decisive[0].finest.removed[-1].text
+        # nothing else is blamed
+        assert all("any amount" in c.finest.removed[-1].text for c in decisive), rep.to_dict()
+    assert found >= 4
+
+
+def test_intermittent_noise_is_not_a_cause(tmp_path):
+    """A decision made a third of the time whatever the context: across seeds, nothing is reported."""
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    for seed in range(8):
+        rep = run(t, resp, _chance(seed, 0.33, 0.33), runs=10, budget=None)
+        assert rep.intermittent and not rep.causes and rep.joint is None, (seed, rep.to_dict())
+
+
+def test_too_rare_stops(tmp_path):
+    """Made once in twenty reruns: too rare to attribute, and said so."""
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    n = [0]
+    lock = threading.Lock()
+
+    def once_in_twenty(req):
+        with lock:
+            n[0] += 1
+            hit = n[0] % 20 == 5
+        return {"tool_calls": [{"id": "r", "name": "issue_refund" if hit else "escalate_to_manager", "arguments": {}}]}
+
+    rep = run(t, resp, once_in_twenty, runs=10, budget=None)
+    assert not rep.intermittent and not rep.causes and rep.baseline.n == 30
+    assert any("Unstable decision" in w for w in rep.warnings)
 
 
 def test_noisy_model_still_finds_cause(tmp_path):
