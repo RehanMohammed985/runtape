@@ -23,8 +23,9 @@ python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl
 ```
 
 `--paper` runs every phase on all four suites. Results are one JSON line per pair, rewritten after each
-pair; a pair that already has a phase isn't run again, so an interrupted run resumes, and running with
-more phases later fills them in for pairs already done. Utility without the attack depends only on the
+phase; a pair that already has a phase isn't run again, so an interrupted run resumes, and running with
+more phases later fills them in for pairs already done. If the model server can't be reached, the run
+waits a minute and tries the pair again, for up to an hour. Utility without the attack depends only on the
 user task and the system prompt, so it is shared between pairs (`benign-<model>.json`).
 
 How the text a method blames is scored:

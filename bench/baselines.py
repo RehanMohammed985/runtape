@@ -49,16 +49,24 @@ def loo(trace, event: int, model=None, *, cache_dir=None, match: str | None = No
     model = model or model_for(req)
     sampler = Sampler(model, cache_dir=cache_dir, budget=None, workers=4)
     segs = extract(req, trace, target.request_id)
-    complete, rated = True, []
-    for i, s in enumerate(segs):
-        r = ablate(req, [s], fill_text(fill))
-        got = []
-        for j in range(runs):
-            try:
-                got.append(sampler.one(r, j))
-            except BudgetExceeded:  # offline rescoring: a reply that was never saved
-                complete = complete and j > 0
-                break
+    ablated = [ablate(req, [s], fill_text(fill)) for s in segs]
+    complete = True
+    try:  # all at once, so the reruns go out in parallel and batched like why's
+        replies = sampler.many([(r, j) for r in ablated for j in range(runs)])
+        per_piece = [replies[i * runs:(i + 1) * runs] for i in range(len(segs))]
+    except BudgetExceeded:  # offline rescoring: rate each piece on the reruns that were saved
+        per_piece = []
+        for r in ablated:
+            got = []
+            for j in range(runs):
+                try:
+                    got.append(sampler.one(r, j))
+                except BudgetExceeded:
+                    complete = complete and j > 0
+                    break
+            per_piece.append(got)
+    rated = []
+    for i, (s, got) in enumerate(zip(segs, per_piece)):
         kept = sum(target.matches(x) for x in got)
         rated.append((kept / len(got) if got else 1.0, -i, s, got))
     flagged = [s for _, _, s, got in rated if got and not target.matches(got[0])]

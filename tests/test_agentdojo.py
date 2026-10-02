@@ -85,6 +85,7 @@ def server():
     srv.shutdown()
 
 
+
 def _run(url, tmp_path, *extra):
     out = tmp_path / "res.jsonl"
     env = {**os.environ, "OPENAI_API_KEY": "test"}
@@ -135,3 +136,30 @@ def test_every_phase_and_resume(server, tmp_path):
     assert report.returncode == 0, report.stderr
     for heading in ("Attribution", "Fixes", "Controls"):
         assert heading in report.stdout, report.stdout
+
+
+class Flaky(Handler):
+    """Hangs up without answering on the first `drops` requests, like a network that has gone away."""
+    drops = 0
+
+    def do_POST(self):
+        if Flaky.drops > 0:
+            Flaky.drops -= 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.close_connection = True
+            return
+        super().do_POST()
+
+
+def test_waits_out_a_dropped_connection(tmp_path):
+    """The connection drops for longer than the client's own retries last: the run waits and tries the pair
+    again instead of crashing, and the failure isn't recorded as a broken agent run."""
+    Flaky.drops = 20
+    srv = HTTPServer(("127.0.0.1", 0), Flaky)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        row, stdout = _run(f"http://127.0.0.1:{srv.server_port}/v1", tmp_path, "--wait", "1")
+    finally:
+        srv.shutdown()
+    assert "can't reach the model server" in stdout
+    assert "error" not in row and row["attacked"] is True and row["headline_in_injection"] is True, row

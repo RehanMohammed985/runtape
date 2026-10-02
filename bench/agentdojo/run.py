@@ -24,7 +24,7 @@ For each (user task, injection task) pair, in phases:
     python bench/agentdojo/run.py ... --paper            # every phase, all four suites
     python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl
 
-Results are one JSON line per pair, rewritten after each pair. A pair that already has a phase is not run
+Results are one JSON line per pair, rewritten after each phase. A pair that already has a phase is not run
 again, so an interrupted run resumes where it stopped, and adding phases later (--phases or --paper)
 fills them in for pairs already run. Model replies for reruns are cached under --work.
 """
@@ -38,6 +38,7 @@ import re
 import sys
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -233,29 +234,20 @@ def run_baselines(trace, ev, tkw: dict, injections, goal, model, cache: Path, ju
     return out
 
 
-def live_runs(suite, user_task, inj_task, injections, a, system: str, n: int) -> dict:
-    """n full AgentDojo runs of the pair (or of the user task alone, when inj_task is None)."""
-    res = {"utility": [], "attack": []}
-    for _ in range(n):
-        pipe = pipeline_for(_client(a.base_url), a.openai, system)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            try:
-                if inj_task is None:
-                    utility, _ = suite.run_task_with_pipeline(pipe, user_task, None, {})
-                    attacked = None
-                else:
-                    utility, attacked = suite.run_task_with_pipeline(pipe, user_task, inj_task, injections)
-            except openai.APIStatusError:
-                raise
-            except Exception:  # noqa: BLE001 - a broken run counts as a failed task
-                utility, attacked = False, None if inj_task is None else False
-        res["utility"].append(bool(utility))
-        if inj_task is not None:
-            res["attack"].append(bool(attacked))
-    if inj_task is None:
-        del res["attack"]
-    return res
+def live_one(suite, user_task, inj_task, injections, a, system: str) -> tuple[bool, bool | None]:
+    """One full AgentDojo run of the pair, or of the user task alone when inj_task is None: (task done,
+    attack worked). A model server that can't be reached raises: that is not a failed task."""
+    pipe = pipeline_for(_client(a.base_url), a.openai, system)
+    try:
+        if inj_task is None:
+            utility, _ = suite.run_task_with_pipeline(pipe, user_task, None, {})
+            return bool(utility), None
+        utility, attacked = suite.run_task_with_pipeline(pipe, user_task, inj_task, injections)
+        return bool(utility), bool(attacked)
+    except openai.APIError:
+        raise
+    except Exception:  # noqa: BLE001 - a broken run counts as a failed task
+        return False, None if inj_task is None else False
 
 
 class Benign:
@@ -266,16 +258,22 @@ class Benign:
         self.path = path
         self.data = json.loads(path.read_text()) if path.exists() else {}
 
-    def get(self, suite, user_task, a, system, n) -> dict:
-        key = f"{a.openai}|{suite.name}|{user_task.ID}|{hashlib.sha256(system.encode()).hexdigest()[:16]}"
-        have = self.data.get(key, [])
-        if len(have) < n:
-            have = have + live_runs(suite, user_task, None, {}, a, system, n - len(have))["utility"]
-            self.data[key] = have
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data))
-            tmp.replace(self.path)
-        return {"utility": have[:n]}
+    def _key(self, suite, user_task, a, system) -> str:
+        return f"{a.openai}|{suite.name}|{user_task.ID}|{hashlib.sha256(system.encode()).hexdigest()[:16]}"
+
+    def missing(self, suite, user_task, a, system, n) -> int:
+        return max(0, n - len(self.data.get(self._key(suite, user_task, a, system), [])))
+
+    def add(self, suite, user_task, a, system, utility: bool) -> None:
+        self.data.setdefault(self._key(suite, user_task, a, system), []).append(bool(utility))
+
+    def save(self) -> None:
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data))
+        tmp.replace(self.path)
+
+    def get(self, suite, user_task, a, system, n) -> list[bool]:
+        return self.data.get(self._key(suite, user_task, a, system), [])[:n]
 
 
 def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, inj_task, injections,
@@ -288,11 +286,31 @@ def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, 
     if a.live_runs:
         configs = [("none", SYSTEM)] + [(c.name, SYSTEM + "\n\n" + c.add_system) for c in fr.candidates
                                         if c.add_system]
-        out["live"] = {}
+        # every run is independent, so they run side by side: under attack, and without it where the
+        # shared benign file doesn't already have enough
+        jobs = []
         for name, system in configs:
-            under_attack = live_runs(suite, user_task, inj_task, injections, a, system, a.live_runs)
-            out["live"][name] = {**under_attack, "benign_utility": benign.get(suite, user_task, a, system,
-                                                                             a.live_runs)["utility"]}
+            jobs += [(name, system, True)] * a.live_runs
+            jobs += [(name, system, False)] * benign.missing(suite, user_task, a, system, a.live_runs)
+        pool = ThreadPoolExecutor(max_workers=max(1, a.workers))
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                results = list(pool.map(lambda j: live_one(suite, user_task, inj_task if j[2] else None,
+                                                           injections, a, j[1]), jobs))
+        finally:
+            pool.shutdown(cancel_futures=True)
+        live = {name: {"attack": [], "utility": []} for name, _ in configs}
+        for (name, system, attacked), (utility, att) in zip(jobs, results):
+            if attacked:
+                live[name]["attack"].append(att)
+                live[name]["utility"].append(utility)
+            else:
+                benign.add(suite, user_task, a, system, utility)
+        benign.save()
+        for name, system in configs:
+            live[name]["benign_utility"] = benign.get(suite, user_task, a, system, a.live_runs)
+        out["live"] = live
     return out
 
 
@@ -344,6 +362,8 @@ def main(argv=None):
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--budget", type=int, default=300, help="max model calls for each why run")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--wait", type=float, default=60, help="seconds to wait before trying a pair again when the "
+                    "model server can't be reached (up to 60 tries)")
     ap.add_argument("--out", help="results file (default bench/results/agentdojo-<model>.jsonl)")
     ap.add_argument("--work", help="folder for traces and the reply cache (default bench/agentdojo)")
     a = ap.parse_args(argv)
@@ -369,6 +389,8 @@ def main(argv=None):
     fn_model = FunctionModel(load_model_fn(a.model_fn)) if a.model_fn else None
     depth = "full" if a.full else "quick"
     bad_requests = 0  # 400s in a row: one is the pair's own problem, three means something general is wrong
+    offline = 0  # failed attempts to reach the server since the last pair finished
+    timeouts: dict[str, int] = {}
 
     redo = set(filter(None, a.redo.split(",")))
     if redo:
@@ -388,15 +410,28 @@ def main(argv=None):
         if a.only:
             pairs = [tuple(x.split("/")) for x in a.only.split(",")]
         controls = sum(1 for r in rows.values() if r.get("suite") == suite_name and r.get("control"))
-        for uid, iid in pairs:
+        pi = 0
+        while pi < len(pairs):
+            uid, iid = pairs[pi]
+            pi += 1
             pair = f"{suite_name}/{uid}/{iid}"
             row = rows.get(pair) or {"pair": pair, "suite": suite_name, "user_task": uid, "injection_task": iid,
                                      "model": a.openai, "attack": a.attack}
+            rows[pair] = row
             t0 = time.time()
             user_task, inj_task = suite.get_user_task_by_id(uid), suite.get_injection_task_by_id(iid)
             path = traces / f"{suite_name}-{uid}-{iid}.jsonl"
             injections = load_attack(a.attack, suite, pipeline_for(None, a.openai)).attack(user_task, inj_task)
             did = []
+
+            def done(phase):  # keep each finished phase, so a crash later in the pair loses only the one running
+                nonlocal t0
+                now = time.time()
+                did.append(phase)
+                row["seconds"] = round(row.get("seconds", 0) + now - t0, 1)
+                t0 = now
+                _save(out, rows)
+
             try:
                 # -- agent
                 if "agent" in phases and "attacked" not in row and "error" not in row:
@@ -408,15 +443,14 @@ def main(argv=None):
                             warnings.simplefilter("ignore")
                             utility, attacked = suite.run_task_with_pipeline(pipe, user_task, inj_task, injections)
                         row.update(utility=utility, attacked=attacked)
-                    except openai.APIStatusError:
+                    except openai.APIError:  # the server, not the agent: dealt with below
                         raise
                     except Exception as e:  # noqa: BLE001 - a broken run of the agent is recorded, not fatal
                         row.update(error=f"{type(e).__name__}: {e}"[:300])
                     finally:
                         rec.close()
-                    did.append("agent")
+                    done("agent")
                 if "attacked" not in row or not path.exists():
-                    rows[pair] = row
                     continue
                 trace = runtape.load(path)
                 pre_env = user_task.init_environment(suite.load_and_inject_default_environment(injections))
@@ -439,18 +473,18 @@ def main(argv=None):
                         row.update(score(rep, injections, inj_task.GOAL))
                     except BudgetExceeded as e:
                         row.update(stopped=str(e))
-                    did.append("why")
+                    done("why")
                 stable = ev is not None and row.get("baseline") and row["baseline"][0] * 2 >= row["baseline"][1]
                 # -- baselines on the same decision
                 if ev is not None and "baselines" in phases and "baselines" not in row:
                     row["baselines"] = run_baselines(trace, ev, tkw, injections, inj_task.GOAL, fn_model, cache,
                                                      judge=not a.no_judge)
-                    did.append("baselines")
+                    done("baselines")
                 # -- fixes, checked on the recorded decision and on the live task
                 if stable and "fix" in phases and "fix" not in row and row.get("headline"):
                     row["fix"] = run_fix(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task, inj_task,
                                          injections, benign)
-                    did.append("fix")
+                    done("fix")
                 # -- a control decision: the user's own action, with the injection present
                 if "control" in phases and "control" not in row and controls < a.controls:
                     cd = control_decision(trace, user_task, inj_task, pre_env)
@@ -470,9 +504,25 @@ def main(argv=None):
                                                        fn_model, cache, judge=not a.no_judge)
                         row["control"] = c
                         controls += 1
-                    did.append("control")
+                    done("control")
+            except openai.APIConnectionError as e:  # no network, or a request that timed out every retry
+                _save(out, rows)
+                offline += 1
+                if isinstance(e, openai.APITimeoutError):
+                    timeouts[pair] = timeouts.get(pair, 0) + 1
+                    if timeouts[pair] >= 2:
+                        print(f"{pair}: skipped for now, the model server kept timing out on it", flush=True)
+                        continue
+                if offline > 60:
+                    print(f"{pair}: the model server still can't be reached ({e.__cause__ or e}).")
+                    print("Stopping. Check the connection and run the same command again to continue.")
+                    return 1
+                print(f"{pair}: can't reach the model server ({e.__cause__ or e}); trying again in {a.wait:g}s",
+                      flush=True)
+                time.sleep(a.wait)
+                pi -= 1  # the same pair again; its finished phases are kept
+                continue
             except openai.APIStatusError as e:
-                rows[pair] = row
                 _save(out, rows)
                 refused = e.status_code in (401, 402, 403, 404) or (e.status_code == 400 and bad_requests >= 2)
                 if refused:
@@ -483,11 +533,8 @@ def main(argv=None):
                 bad_requests += e.status_code == 400
                 print(f"{pair}: skipped, the model server rejected a request ({str(e)[:200]})")
                 continue
-            bad_requests = 0
-            rows[pair] = row
+            bad_requests = offline = 0
             if did:
-                row["seconds"] = round(row.get("seconds", 0) + time.time() - t0, 1)
-                _save(out, rows)
                 print(f"{pair}: {verdict(row)}", flush=True)
     _save(out, rows)
     print(f"\nresults in {out}. Summary: python bench/agentdojo/report.py {out}")
