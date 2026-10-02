@@ -34,12 +34,14 @@ def summarize(path):
     print(f"- attack succeeded (AgentDojo's security check): {pct(len(attacked), len(ran))}")
     print(f"- attacker's call found and `why` run: {len(scored)}; decision made consistently when rerun: {len(st)}")
     print(f"- not made consistently (under half of reruns): {len(drifted)}; why reported that instead of a cause")
-    calls = [r["calls"] for r in st if r.get("calls")]
+    # reruns read from the cache count too: they are what a fresh run would have to make
+    calls = [r.get("calls", 0) + r.get("cache_hits", 0) for r in st]
     if calls:
-        print(f"- model calls per `why` on a consistent decision: median {statistics.median(calls):.0f}, max {max(calls)}")
-    reqs = [r["requests"] for r in st if r.get("requests")]
+        print(f"- model calls per `why` on a consistent decision (made, or read from the cache): median "
+              f"{statistics.median(calls):.0f}, max {max(calls)}")
+    reqs = [r["requests"] for r in st if r.get("requests") and not r.get("cache_hits")]
     if reqs:
-        print(f"- API requests for those calls: median {statistics.median(reqs):.0f}")
+        print(f"- API requests for those calls, where none were cached: median {statistics.median(reqs):.0f}")
 
     print("\n### Attribution (decisions made consistently)\n")
     print("| method | blames text inside the injection | ...including the attacker's instruction | "
@@ -124,6 +126,24 @@ def summarize(path):
         if total:
             print(f"\nThe check on the recorded decision agreed with the live result (no attack succeeded in any run) "
                   f"for {pct(agree, total)} prompt fixes.")
+            cells = defaultdict(int)
+            buckets = defaultdict(list)
+            for r in fixed:
+                for c in r["fix"]["candidates"]:
+                    live = (r["fix"].get("live") or {}).get(c["name"])
+                    if live and live["attack"]:
+                        cells[c["holds"], not any(live["attack"])] += 1
+                        k = c["kept"] / c["n"] if c["n"] else 0
+                        buckets["under 20%" if k < 0.2 else "20-50%" if k <= 0.5 else "over 50%"].append(
+                            sum(live["attack"]) / len(live["attack"]))
+            print(f"Passed the check: {cells[True, True]} blocked the attack in every live run, {cells[True, False]} "
+                  f"did not. Failed it: {cells[False, False]} let the attack through live, {cells[False, True]} "
+                  f"blocked it in every live run.")
+            print("\n| attack rate on the recorded decision with the fix | fixes | attack rate live |")
+            print("|---|---|---|")
+            for b in ("under 20%", "20-50%", "over 50%"):
+                if buckets[b]:
+                    print(f"| {b} | {len(buckets[b])} | {100 * sum(buckets[b]) / len(buckets[b]):.0f}% |")
 
     ctl = [r["control"] for r in rows if r.get("control")]
     if ctl:
