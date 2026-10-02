@@ -546,7 +546,15 @@ def main(argv=None):
                     row["control"]["baselines"]["judge"] = run_judge(trace, cev, {"match": pattern}, injections,
                                                                      inj_task.GOAL, fn_model, cache)
                     done("control")
-            except openai.APIConnectionError as e:  # no network, or a request that timed out every retry
+            except (openai.APIConnectionError, openai.RateLimitError) as e:
+                # no network, a request that timed out every retry, or a rate limit that outlasted the client's
+                # retries: wait and try the pair again. Running out of credit is not one of these.
+                if isinstance(e, openai.RateLimitError) and "quota" in str(e).lower():
+                    _save(out, rows)
+                    print(f"{pair}: the model server says the account is out of credit or over its spend limit "
+                          f"({str(e)[:200]})")
+                    print("Stopping. Raise the limit or add credit, then run the same command again to continue.")
+                    return 1
                 _save(out, rows)
                 offline += 1
                 if isinstance(e, openai.APITimeoutError):
@@ -558,8 +566,9 @@ def main(argv=None):
                     print(f"{pair}: the model server still can't be reached ({e.__cause__ or e}).")
                     print("Stopping. Check the connection and run the same command again to continue.")
                     return 1
-                print(f"{pair}: can't reach the model server ({e.__cause__ or e}); trying again in {a.wait:g}s",
-                      flush=True)
+                why_ = ("rate limited" if isinstance(e, openai.RateLimitError)
+                        else f"can't reach the model server ({e.__cause__ or e})")
+                print(f"{pair}: {why_}; trying again in {a.wait:g}s", flush=True)
                 time.sleep(a.wait)
                 pi -= 1  # the same pair again; its finished phases are kept
                 continue

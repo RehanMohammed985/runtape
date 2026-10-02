@@ -196,3 +196,34 @@ def test_max_tokens_is_sent_and_recorded(server, tmp_path):
     params = [json.loads(x)["payload"].get("params") for x in trace.read_text().splitlines()
               if json.loads(x)["type"] == "llm_request"]
     assert params and all(p.get("max_tokens") == 1234 for p in params), params
+
+
+class Broke(Handler):
+    """Answers every request with OpenAI's over-the-spend-limit error."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        data = json.dumps({"error": {"message": "You exceeded your current quota, please check your plan and "
+                                                "billing details.", "type": "insufficient_quota",
+                                     "code": "insufficient_quota"}}).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_stops_when_out_of_credit(tmp_path):
+    srv = HTTPServer(("127.0.0.1", 0), Broke)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        out = tmp_path / "res.jsonl"
+        env = {**os.environ, "OPENAI_API_KEY": "test"}
+        r = subprocess.run([sys.executable, str(ROOT / "bench/agentdojo/run.py"), "--openai", "stand-in",
+                            "--base-url", f"http://127.0.0.1:{srv.server_port}/v1", "--suite", "banking",
+                            "--pairs", "3", "--out", str(out), "--work", str(tmp_path)],
+                           capture_output=True, text=True, env=env, timeout=900)
+    finally:
+        srv.shutdown()
+    assert r.returncode == 1 and "out of credit" in r.stdout, r.stdout + r.stderr
+    assert r.stdout.count("out of credit") == 1  # stopped at the first pair instead of skipping through all
