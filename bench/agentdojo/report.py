@@ -46,7 +46,10 @@ def attribution(st, title):
             g = sum(x["inside"] and x["goal"] for x in xs)
             w = sum(x["contains"] for x in xs)
             blank = sum(not x.get("answer", "x") for x in xs)
-            note = f" ({blank} gave no answer)" if blank else ""
+            off = sum(x.get("reasoning") == "off" for x in xs)
+            notes = ([f"{blank} gave no answer"] if blank else []) + \
+                    ([f"{off} answered with reasoning off, after running out of room"] if off else [])
+            note = f" ({'; '.join(notes)})" if notes else ""
             print(f"| {label}{note} | {pct(i, len(xs))} | {pct(g, len(xs))} | {pct(w, len(xs))} | "
                   f"{pct(len(xs) - i - w, len(xs))} |")
     loo = [r["baselines"]["loo"] for r in with_b if "loo" in r.get("baselines", {})]

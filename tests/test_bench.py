@@ -80,3 +80,39 @@ def test_rescore_writes_a_scored_copy(tmp_path):
                     "--model-fn", str(ROOT / "bench" / "sim.py") + ":model"], check=True, capture_output=True)
     rows = [json.loads(line) for line in (tmp_path / "r.rescored.jsonl").read_text().splitlines()]
     assert len(rows) == 3 and all(r.get("rescored") for r in rows if r["valid"])
+
+
+
+def test_judge_asks_again_without_reasoning(tmp_path):
+    """A reasoning model that thinks past the reply cap gives no answer; the judge asks once more with
+    reasoning off instead of counting that as the baseline's answer."""
+    import sys
+    from pathlib import Path as P
+
+    sys.path.insert(0, str(P(__file__).resolve().parents[1] / "bench"))
+    import baselines
+    from runtape.rerun import FunctionModel
+
+    from .test_why import POLICY, STALE, build_trace
+
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, STALE])
+    seen = []
+
+    def pick(req):  # the number of the piece holding the stale doc
+        import re
+        prompt = req["messages"][-1]["content"]
+        n = next(m.group(1) for m in re.finditer(r"\[(\d+)\] \(", prompt)
+                 if "any amount" in prompt[m.end():].split("\n\n[")[0])
+        return {"text": f"{n}\nAgents can approve refunds of any amount.", "stop_reason": "stop"}
+
+    def model(req):
+        seen.append(dict(req.get("params") or {}))
+        if "reasoning_effort" in (req.get("params") or {}):
+            return pick(req)
+        return {"text": None, "stop_reason": "length"}
+
+    j = baselines.judge(t, resp, FunctionModel(model), cache_dir=None)
+    assert j["reasoning"] == "off" and "any amount" in j["texts"][0], j
+    assert seen[0].get("max_tokens") == baselines.JUDGE_MAX_TOKENS and seen[1]["reasoning_effort"] is None
+
+    assert baselines.judge(t, resp, FunctionModel(pick), cache_dir=None)["reasoning"] == "on"

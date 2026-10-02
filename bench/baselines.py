@@ -8,7 +8,8 @@ score every method the same way:
   and no separating causes from inputs the action needs. Two readings: every piece whose removal changed
   the decision in one rerun, and the piece whose removal lowered the decision rate most over five.
 - judge: ask a model which numbered piece caused the call, and to quote the sentence. One call, with room
-  for a reasoning model to think before it answers.
+  for a reasoning model to think before it answers; if it thinks past that without answering, a second
+  call with reasoning off.
 """
 from __future__ import annotations
 
@@ -91,6 +92,17 @@ def judge(trace, event: int, model=None, *, cache_dir=None, match: str | None = 
     model = model or model_for(req)
     sampler = Sampler(model, cache_dir=cache_dir, budget=None, workers=1)
     reply = sampler.one(jreq, 0)
+    reasoning = "on"
+    if not (reply.text or "").strip() and reply.stop_reason == "length":
+        # a reasoning model thought past the cap without answering: ask once more with reasoning off (Sarvam
+        # and servers like it turn it off with reasoning_effort set to null). A server that rejects that keeps
+        # the empty answer.
+        try:
+            reply = sampler.one({**jreq, "params": {**jreq["params"], "reasoning_effort": None}}, 0)
+            reasoning = "off"
+        except Exception as e:  # noqa: BLE001
+            if getattr(e, "status_code", None) != 400:
+                raise
     text = (reply.text or "").strip()
     m = re.search(r"\d+", text)
     idx = int(m.group()) if m else None
@@ -104,4 +116,5 @@ def judge(trace, event: int, model=None, *, cache_dir=None, match: str | None = 
     else:
         texts = [seg.text] if seg is not None else []
     return {"texts": texts, "where": seg.where if seg else None, "answer": text[:300],
-            "stop_reason": reply.stop_reason, "calls": sampler.calls, "cache_hits": sampler.hits}
+            "stop_reason": reply.stop_reason, "reasoning": reasoning, "calls": sampler.calls,
+            "cache_hits": sampler.hits}

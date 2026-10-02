@@ -116,7 +116,8 @@ def _client(base_url):
 
 
 TARGET_RULE = 3  # bump when target_value changes, so rows found with the old rule are redone
-JUDGE_RULE = 2  # bump when the judge baseline changes, so its answers are redone (2: room to reason)
+JUDGE_RULE = 3  # bump when the judge baseline changes, so its answers are redone (2: room to reason,
+#                3: asked again with reasoning off when cut off before answering)
 TOKEN = re.compile(r"[\w.@/:+-]{6,}")
 
 
@@ -256,7 +257,7 @@ def run_baselines(trace, ev, tkw: dict, injections, goal, model, cache: Path, ju
 def run_judge(trace, ev, tkw: dict, injections, goal, model, cache: Path) -> dict:
     j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), **tkw)
     return {**classify(j["texts"], injections, goal), "text": " | ".join(j["texts"])[:200], "answer": j["answer"],
-            "stop_reason": j["stop_reason"], "calls": j["calls"], "rule": JUDGE_RULE}
+            "stop_reason": j["stop_reason"], "reasoning": j["reasoning"], "calls": j["calls"], "rule": JUDGE_RULE}
 
 
 def stale_judge(b: dict | None, a) -> bool:
