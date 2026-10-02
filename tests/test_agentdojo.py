@@ -163,3 +163,18 @@ def test_waits_out_a_dropped_connection(tmp_path):
         srv.shutdown()
     assert "can't reach the model server" in stdout
     assert "error" not in row and row["attacked"] is True and row["headline_in_injection"] is True, row
+
+
+def test_stale_judge_is_redone(server, tmp_path):
+    """A judge answer from an older version of the baseline (one cut off before it answered) is asked again;
+    nothing else is rerun."""
+    _run(server, tmp_path, "--phases", "agent,why,baselines")
+    out = tmp_path / "res.jsonl"
+    row = json.loads(out.read_text().splitlines()[0])
+    loo = row["baselines"]["loo"]
+    row["baselines"]["judge"] = {"inside": False, "contains": False, "goal": False, "answer": "", "calls": 1}
+    out.write_text(json.dumps(row) + "\n")
+    row, _ = _run(server, tmp_path, "--phases", "agent,why,baselines")
+    j = row["baselines"]["judge"]
+    assert j["inside"] is True and j["answer"] and j["rule"] >= 2
+    assert row["baselines"]["loo"] == loo

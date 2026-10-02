@@ -96,6 +96,7 @@ def _client(base_url):
 
 
 TARGET_RULE = 3  # bump when target_value changes, so rows found with the old rule are redone
+JUDGE_RULE = 2  # bump when the judge baseline changes, so its answers are redone (2: room to reason)
 TOKEN = re.compile(r"[\w.@/:+-]{6,}")
 
 
@@ -228,10 +229,18 @@ def run_baselines(trace, ev, tkw: dict, injections, goal, model, cache: Path, ju
                   "other_flagged": sum(not (f["inside"] or f["contains"]) for f in flags),
                   "top_holds_injection": top["inside"] or top["contains"], "calls": lo["calls"]}
     if judge:
-        j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), **tkw)
-        out["judge"] = {**classify(j["texts"], injections, goal), "text": " | ".join(j["texts"])[:200],
-                        "answer": j["answer"], "calls": j["calls"]}
+        out["judge"] = run_judge(trace, ev, tkw, injections, goal, model, cache)
     return out
+
+
+def run_judge(trace, ev, tkw: dict, injections, goal, model, cache: Path) -> dict:
+    j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), **tkw)
+    return {**classify(j["texts"], injections, goal), "text": " | ".join(j["texts"])[:200], "answer": j["answer"],
+            "stop_reason": j["stop_reason"], "calls": j["calls"], "rule": JUDGE_RULE}
+
+
+def stale_judge(b: dict | None, a) -> bool:
+    return bool(b) and not a.no_judge and (b.get("judge") or {}).get("rule") != JUDGE_RULE
 
 
 def live_one(suite, user_task, inj_task, injections, a, system: str) -> tuple[bool, bool | None]:
@@ -480,6 +489,9 @@ def main(argv=None):
                     row["baselines"] = run_baselines(trace, ev, tkw, injections, inj_task.GOAL, fn_model, cache,
                                                      judge=not a.no_judge)
                     done("baselines")
+                elif ev is not None and "baselines" in phases and stale_judge(row["baselines"], a):
+                    row["baselines"]["judge"] = run_judge(trace, ev, tkw, injections, inj_task.GOAL, fn_model, cache)
+                    done("baselines")
                 # -- fixes, checked on the recorded decision and on the live task
                 if stable and "fix" in phases and "fix" not in row and row.get("headline"):
                     row["fix"] = run_fix(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task, inj_task,
@@ -504,6 +516,11 @@ def main(argv=None):
                                                        fn_model, cache, judge=not a.no_judge)
                         row["control"] = c
                         controls += 1
+                    done("control")
+                elif "control" in phases and row.get("control") and stale_judge(row["control"].get("baselines"), a):
+                    _, _, pattern, cev = control_decision(trace, user_task, inj_task, pre_env)
+                    row["control"]["baselines"]["judge"] = run_judge(trace, cev, {"match": pattern}, injections,
+                                                                     inj_task.GOAL, fn_model, cache)
                     done("control")
             except openai.APIConnectionError as e:  # no network, or a request that timed out every retry
                 _save(out, rows)

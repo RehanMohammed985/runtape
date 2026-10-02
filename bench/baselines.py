@@ -7,7 +7,8 @@ score every method the same way:
 - loo: plain leave-one-out over whole messages and tool results, with no significance test, no narrowing
   and no separating causes from inputs the action needs. Two readings: every piece whose removal changed
   the decision in one rerun, and the piece whose removal lowered the decision rate most over five.
-- judge: ask a model which numbered piece caused the call, and to quote the sentence. One call.
+- judge: ask a model which numbered piece caused the call, and to quote the sentence. One call, with room
+  for a reasoning model to think before it answers.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ agent to make this decision? Answer with the piece number alone on the first lin
 quote the exact sentence from that piece that caused it.
 
 {pieces}"""
+JUDGE_MAX_TOKENS = 4096  # a reasoning model spends output tokens thinking; servers often default to 2048
 
 
 def dry(trace, event: int) -> dict:
@@ -85,7 +87,7 @@ def judge(trace, event: int, model=None, *, cache_dir=None, match: str | None = 
     pieces = "\n\n".join(f"[{i}] ({s.where})\n{s.text}" for i, s in enumerate(segs, 1))
     prompt = JUDGE_PROMPT.format(decision=target.question(), pieces=pieces)
     jreq = {k: v for k, v in req.items() if k in ("api", "provider", "model", "endpoint")}
-    jreq.update(messages=[{"role": "user", "content": prompt}], params={})
+    jreq.update(messages=[{"role": "user", "content": prompt}], params={"max_tokens": JUDGE_MAX_TOKENS})
     model = model or model_for(req)
     sampler = Sampler(model, cache_dir=cache_dir, budget=None, workers=1)
     reply = sampler.one(jreq, 0)
@@ -102,4 +104,4 @@ def judge(trace, event: int, model=None, *, cache_dir=None, match: str | None = 
     else:
         texts = [seg.text] if seg is not None else []
     return {"texts": texts, "where": seg.where if seg else None, "answer": text[:300],
-            "calls": sampler.calls, "cache_hits": sampler.hits}
+            "stop_reason": reply.stop_reason, "calls": sampler.calls, "cache_hits": sampler.hits}

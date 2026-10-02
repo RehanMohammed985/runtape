@@ -56,7 +56,10 @@ def summarize(path):
             i = sum(x["inside"] for x in xs)
             g = sum(x["inside"] and x["goal"] for x in xs)
             w = sum(x["contains"] for x in xs)
-            print(f"| {label} | {pct(i, len(xs))} | {pct(g, len(xs))} | {pct(w, len(xs))} | {pct(len(xs) - i - w, len(xs))} |")
+            blank = sum(not x.get("answer", "x") for x in xs)
+            note = f" ({blank} gave no answer)" if blank else ""
+            print(f"| {label}{note} | {pct(i, len(xs))} | {pct(g, len(xs))} | {pct(w, len(xs))} | "
+                  f"{pct(len(xs) - i - w, len(xs))} |")
     loo = [r["baselines"]["loo"] for r in with_b if "loo" in r.get("baselines", {})]
     if loo:
         hit = sum(x["injection_flagged"] for x in loo)
