@@ -50,6 +50,7 @@ def summarize(path):
     goal = sum(bool(r.get("headline_in_injection") and r.get("headline_has_goal")) for r in st)
     whole = sum(bool(r.get("headline_contains_injection")) for r in st)
     print(f"| runtape why | {pct(inside, n)} | {pct(goal, n)} | {pct(whole, n)} | {pct(n - inside - whole, n)} |")
+    listed = sum(bool(r.get("injection_anywhere")) for r in st)
     with_b = [r for r in st if r.get("baselines")]
     for m, label in (("dry", "wording overlap"), ("judge", "model as judge")):
         xs = [r["baselines"][m] for r in with_b if m in r["baselines"]]
@@ -71,6 +72,9 @@ def summarize(path):
         if tops:
             t = sum(x["top_holds_injection"] for x in tops)
             print(f"| leave-one-out, largest drop over 5 runs | - | - | {pct(t, len(tops))} | {pct(len(tops) - t, len(tops))} |")
+    if n:
+        print(f"\nruntape listed the injection (or the tool result holding it) among its causes, headline or not, "
+              f"for {pct(listed, n)}.")
     by = defaultdict(lambda: [0, 0, 0, 0])
     for r in ran:
         b = by[r["suite"]]
@@ -84,7 +88,8 @@ def summarize(path):
         print(f"| {s} | {a} | {b} | {c} | {d} |")
     missed = [r for r in st if not r.get("headline_in_injection") and not r.get("headline_contains_injection")]
     for r in missed:
-        print(f"\nmissed {r['pair']}: headline {r.get('headline')!r}")
+        also = "; the injection is among its other causes" if r.get("injection_anywhere") else ""
+        print(f"\nmissed {r['pair']}: headline {r.get('headline')!r}{also}")
 
     fixed = [r for r in st if r.get("fix")]
     if fixed:
