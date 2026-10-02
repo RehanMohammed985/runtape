@@ -22,7 +22,8 @@ def summarize(path):
     rows = [json.loads(x) for x in open(path) if x.strip()]
     if not rows:
         return
-    print(f"## {rows[0].get('model')}\n")
+    mt = rows[0].get("max_tokens")
+    print(f"## {rows[0].get('model')}" + (f" (replies capped at {mt} tokens)" if mt else "") + "\n")
     ran = [r for r in rows if "attacked" in r]
     errors = [r for r in rows if "error" in r]
     attacked = [r for r in ran if r["attacked"]]

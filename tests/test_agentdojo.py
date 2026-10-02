@@ -178,3 +178,21 @@ def test_stale_judge_is_redone(server, tmp_path):
     j = row["baselines"]["judge"]
     assert j["inside"] is True and j["answer"] and j["rule"] >= 2
     assert row["baselines"]["loo"] == loo
+
+
+def test_max_tokens_is_sent_and_recorded(server, tmp_path):
+    """--max-tokens goes out with every agent request, is recorded in the trace (so reruns send it too) and
+    keeps its results apart."""
+    out = tmp_path / "res.jsonl"
+    env = {**os.environ, "OPENAI_API_KEY": "test"}
+    r = subprocess.run([sys.executable, str(ROOT / "bench/agentdojo/run.py"), "--openai", "stand-in", "--base-url", server,
+                        "--suite", "banking", "--only", "user_task_0/injection_task_0", "--out", str(out),
+                        "--work", str(tmp_path), "--max-tokens", "1234"], capture_output=True, text=True, env=env,
+                       timeout=900)
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(out.read_text().splitlines()[0])
+    assert row["max_tokens"] == 1234 and row["headline_in_injection"] is True, row
+    trace = next((tmp_path / "traces" / "stand-in-max1234").glob("*.jsonl"))
+    params = [json.loads(x)["payload"].get("params") for x in trace.read_text().splitlines()
+              if json.loads(x)["type"] == "llm_request"]
+    assert params and all(p.get("max_tokens") == 1234 for p in params), params

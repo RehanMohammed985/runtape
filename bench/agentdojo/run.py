@@ -40,6 +40,7 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parents[1] / "src"), str(HERE.parent)]
@@ -86,6 +87,25 @@ def pipeline_for(client, model: str, system: str = SYSTEM) -> AgentPipeline:
     p = AgentPipeline([SystemMessage(system), InitQuery(), llm, ToolsExecutionLoop([ToolsExecutor(), llm])])
     p.name = "local"  # only used by the attack to address the model; the attack below uses no model name
     return p
+
+
+class _Params:
+    """A client that adds request parameters (max_tokens) to every chat completion. It sits above runtape's
+    recorder, so the trace shows them and the reruns send them too."""
+
+    def __init__(self, client, params: dict):
+        self._client, self._params = client, params
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kw):
+        return self._client.chat.completions.create(**{**self._params, **kw})
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def with_params(client, a):
+    return _Params(client, {"max_tokens": a.max_tokens}) if a.max_tokens else client
 
 
 def _client(base_url):
@@ -246,7 +266,7 @@ def stale_judge(b: dict | None, a) -> bool:
 def live_one(suite, user_task, inj_task, injections, a, system: str) -> tuple[bool, bool | None]:
     """One full AgentDojo run of the pair, or of the user task alone when inj_task is None: (task done,
     attack worked). A model server that can't be reached raises: that is not a failed task."""
-    pipe = pipeline_for(_client(a.base_url), a.openai, system)
+    pipe = pipeline_for(with_params(_client(a.base_url), a), a.openai, system)
     try:
         if inj_task is None:
             utility, _ = suite.run_task_with_pipeline(pipe, user_task, None, {})
@@ -368,6 +388,9 @@ def main(argv=None):
     ap.add_argument("--no-judge", action="store_true", help="skip the model-as-judge baseline")
     ap.add_argument("--live-runs", type=int, default=3, help="full task runs per fix, with and without attack")
     ap.add_argument("--controls", type=int, default=10, help="control decisions per suite (control phase)")
+    ap.add_argument("--max-tokens", type=int, help="cap on each reply, sent with every agent request and so with "
+                    "every rerun (a reasoning model can run out of the server's default while thinking); results "
+                    "go to their own files")
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--budget", type=int, default=300, help="max model calls for each why run")
     ap.add_argument("--workers", type=int, default=4)
@@ -381,7 +404,7 @@ def main(argv=None):
     if a.model_fn and a.live_runs and "fix" in phases and not a.base_url:
         a.live_runs = 0  # nothing to run the live agent against
 
-    label = re.sub(r"[^\w.-]+", "_", a.openai)
+    label = re.sub(r"[^\w.-]+", "_", a.openai) + (f"-max{a.max_tokens}" if a.max_tokens else "")
     out = Path(a.out or HERE.parent / "results" / f"agentdojo-{label}.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
     rows: dict[str, dict] = {}
@@ -425,7 +448,8 @@ def main(argv=None):
             pi += 1
             pair = f"{suite_name}/{uid}/{iid}"
             row = rows.get(pair) or {"pair": pair, "suite": suite_name, "user_task": uid, "injection_task": iid,
-                                     "model": a.openai, "attack": a.attack}
+                                     "model": a.openai, "attack": a.attack,
+                                     **({"max_tokens": a.max_tokens} if a.max_tokens else {})}
             rows[pair] = row
             t0 = time.time()
             user_task, inj_task = suite.get_user_task_by_id(uid), suite.get_injection_task_by_id(iid)
@@ -446,7 +470,7 @@ def main(argv=None):
                 if "agent" in phases and "attacked" not in row and "error" not in row:
                     path.unlink(missing_ok=True)
                     rec = runtape.Recorder(path, name=f"agentdojo-{pair}", tags={"bench": "agentdojo", "pair": pair})
-                    pipe = pipeline_for(rec.wrap(_client(a.base_url)), a.openai)
+                    pipe = pipeline_for(with_params(rec.wrap(_client(a.base_url)), a), a.openai)
                     try:
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore")
