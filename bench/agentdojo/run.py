@@ -274,7 +274,8 @@ def run_baselines(trace, ev, tkw: dict, injections, goal, model, cache: Path, ju
 
 
 def run_judge(trace, ev, tkw: dict, injections, goal, model, cache: Path) -> dict:
-    j = baselines.judge(trace, ev, model, cache_dir=str(cache / "judge"), **tkw)
+    # why asks the model the same question first, so they share a cache and pay for it once
+    j = baselines.judge(trace, ev, model, cache_dir=str(cache / "why"), **tkw)
     return {**classify(j["texts"], injections, goal), "text": " | ".join(j["texts"])[:200], "answer": j["answer"],
             "stop_reason": j["stop_reason"], "reasoning": j["reasoning"], "calls": j["calls"], "rule": JUDGE_RULE}
 
@@ -445,10 +446,21 @@ def main(argv=None):
     offline = 0  # failed attempts to reach the server since the last pair finished
     timeouts: dict[str, int] = {}
 
+    old_judge = cache / "judge"  # judge answers cached before the two shared a folder
+    if old_judge.is_dir():
+        (cache / "why").mkdir(parents=True, exist_ok=True)
+        for f in old_judge.glob("*.json"):
+            dest = cache / "why" / f.name
+            if not dest.exists():
+                dest.write_bytes(f.read_bytes())
+
     redo = set(filter(None, a.redo.split(",")))
     if redo:
         for row in rows.values():
             if "why" in redo:  # the fixes are based on why's cause, so they go too; the baselines stay
+                if row.get("fix") and row.get("headline") and "fix" not in redo:
+                    # kept aside: if the new search names the same cause, the fixes (and their live runs) stand
+                    row["_kept_fix"] = {"headline": row["headline"], "fix": row["fix"]}
                 for k in [k for k in row if k.startswith("headline") or (k in REDO_KEYS and k != "baselines")]:
                     del row[k]
             for ph in redo & {"baselines", "fix", "control"}:
@@ -531,6 +543,9 @@ def main(argv=None):
                         row.update(score(rep, injections, inj_task.GOAL))
                     except BudgetExceeded as e:
                         row.update(stopped=str(e))
+                    kept = row.pop("_kept_fix", None)
+                    if kept and kept["headline"] == row.get("headline"):
+                        row["fix"] = kept["fix"]
                     done("why")
                 # a cause to fix: found on a decision made consistently, or on an intermittent one
                 stable = ev is not None and row.get("baseline") and (

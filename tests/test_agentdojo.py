@@ -53,10 +53,13 @@ def reply(messages):
 
 
 class Handler(BaseHTTPRequestHandler):
+    requests = 0
+
     def log_message(self, *a):
         pass
 
     def do_POST(self):
+        Handler.requests += 1
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         r = reply(body["messages"])
         choices = []
@@ -137,6 +140,15 @@ def test_every_phase_and_resume(server, tmp_path):
     assert report.returncode == 0, report.stderr
     for heading in ("Attribution", "Fixes", "Controls"):
         assert heading in report.stdout, report.stdout
+
+    # searching again with --redo why: the guess is the judge's cached answer, and the cause comes out the same,
+    # so the fixes and their live runs are kept rather than run again
+    assert any((tmp_path / ".cache" / "why").glob("*.json"))
+    Handler.requests = 0
+    again, _ = _run(server, tmp_path, "--phases", "agent,why,baselines,fix,control", "--redo", "why")
+    assert again["headline"] == row["headline"] and again["fix"] == row["fix"], again
+    assert "_kept_fix" not in again
+    assert Handler.requests == 0  # everything else came from the cache (redoing the fixes too costs 51 here)
 
 
 class Flaky(Handler):
