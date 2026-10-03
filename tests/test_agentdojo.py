@@ -273,3 +273,51 @@ def test_rate_limit_that_mentions_quota_is_waited_out(tmp_path):
         srv.shutdown()
     assert "rate limited" in stdout and "out of credit" not in stdout
     assert row["attacked"] is True and row["headline_in_injection"] is True, row
+
+
+
+class Signed(Handler):
+    """Like Gemini 3: every tool call comes with a thought signature, and a request whose history has a tool call
+    without its signature is rejected."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        for m in body["messages"]:
+            for tc in m.get("tool_calls") or []:
+                if (tc.get("extra_content") or {}).get("google", {}).get("thought_signature") != "sig-" + tc["id"]:
+                    data = json.dumps({"error": {"code": 400, "message": "Function call is missing a "
+                                                 "thought_signature", "status": "INVALID_ARGUMENT"}}).encode()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+        r = reply(body["messages"])
+        choices = []
+        for k in range(body.get("n") or 1):
+            msg = {"role": "assistant", "content": r.get("text")}
+            if "tool_calls" in r:
+                msg["tool_calls"] = [{"id": f"call_{k}_{i}", "type": "function",
+                                      "function": {"name": n, "arguments": json.dumps(a)},
+                                      "extra_content": {"google": {"thought_signature": f"sig-call_{k}_{i}"}}}
+                                     for i, (n, a) in enumerate(r["tool_calls"])]
+            choices.append({"index": k, "message": msg, "finish_reason": "tool_calls" if "tool_calls" in r else "stop"})
+        data = json.dumps({"id": "x", "object": "chat.completion", "created": 0, "model": body["model"],
+                           "choices": choices}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_thought_signatures_are_passed_back(tmp_path):
+    srv = HTTPServer(("127.0.0.1", 0), Signed)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        row, stdout = _run(f"http://127.0.0.1:{srv.server_port}/v1", tmp_path)
+    finally:
+        srv.shutdown()
+    # the agent ran and why's reruns replayed the history with its signatures
+    assert row["attacked"] is True and row["headline_in_injection"] is True, (row, stdout)

@@ -63,6 +63,20 @@ PHASES = ("agent", "why", "baselines", "fix", "control")
 READ_ONLY = re.compile(r"^(get|read|search|list|check|find|view)_")
 
 
+# Gemini 3 returns a thought signature with each tool call (extra_content.google.thought_signature) and
+# rejects a later request whose history drops it. AgentDojo's message conversion drops it, so keep each one by
+# tool call id and put it back. runtape records requests as sent, so its reruns carry the signatures too.
+_signatures: dict[str, dict] = {}
+
+
+def _keep_signatures(message):
+    for tc in message.tool_calls or []:
+        extra = (getattr(tc, "model_extra", None) or {}).get("extra_content")
+        if extra and tc.id:
+            _signatures[tc.id] = extra
+    return _original_assistant(message)
+
+
 def _plain_messages(message, model_name):
     """AgentDojo sends the system prompt as a 'developer' message with content parts. Many
     OpenAI-compatible servers only accept 'system' and string content, so send that instead."""
@@ -73,11 +87,16 @@ def _plain_messages(message, model_name):
         out["content"] = "".join(part.get("text", "") for part in out["content"])
     if out.get("role") == "tool" and not str(out.get("content") or "").strip():
         out["content"] = "(empty)"  # some tools return nothing; several APIs reject an empty tool message
+    if out.get("role") == "assistant" and out.get("tool_calls"):
+        out["tool_calls"] = [{**tc, "extra_content": _signatures[tc["id"]]} if tc.get("id") in _signatures else tc
+                             for tc in out["tool_calls"]]
     return out
 
 
 _original = openai_llm._message_to_openai
 openai_llm._message_to_openai = _plain_messages
+_original_assistant = openai_llm._openai_to_assistant_message
+openai_llm._openai_to_assistant_message = _keep_signatures
 
 SYSTEM = load_system_message(None)
 
