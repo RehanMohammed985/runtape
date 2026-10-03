@@ -74,6 +74,11 @@ A rerun resends the request, so it needs what was sent:
 Images and audio in OpenAI-format messages are kept as they were. Other non-text content (Anthropic image
 blocks, reasoning blocks) is dropped, so a decision that depends on it won't repeat on rerun.
 
+## Timeouts
+
+Reruns wait 10 seconds to connect and 300 seconds for a reply, then retry. A slow local model may need longer:
+set `RUNTAPE_TIMEOUT` (seconds).
+
 ## runtape why options
 
 ```

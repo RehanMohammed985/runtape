@@ -151,3 +151,17 @@ def test_early_stop_still_reports_full_evidence_for_the_headline(tmp_path):
     top = rep.causes[0].finest
     assert top.n == 10 and top.kept == 0 and top.p < 1e-4
     assert rep.calls < 190  # was 206 before narrowing stopped early
+
+
+def test_rerun_clients_give_up_on_a_dead_connection(monkeypatch):
+    """A request cut off by a network drop must not hang a run: 10 seconds to connect, RUNTAPE_TIMEOUT (default
+    300) for the reply, in each SDK's own Timeout."""
+    from runtape.rerun import AnthropicModel, OpenAIChatModel, OpenAIResponsesModel
+
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    for M in (OpenAIChatModel, OpenAIResponsesModel, AnthropicModel):
+        t = M(endpoint="http://127.0.0.1:1/v1").client.timeout
+        assert t.connect == 10.0 and t.read == 300.0, (M, t)
+    monkeypatch.setenv("RUNTAPE_TIMEOUT", "900")
+    assert OpenAIChatModel().client.timeout.read == 900.0

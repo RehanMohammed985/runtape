@@ -251,8 +251,8 @@ class AnthropicModel:
         import anthropic
 
         if self.endpoint:
-            return anthropic.Anthropic(base_url=self.endpoint, max_retries=8)
-        return anthropic.Anthropic(max_retries=8)  # why runs many calls; ride out rate limits
+            return anthropic.Anthropic(base_url=self.endpoint, max_retries=8, timeout=client_timeout(anthropic))
+        return anthropic.Anthropic(max_retries=8, timeout=client_timeout(anthropic))  # why runs many calls; ride out rate limits
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _Anthropic
@@ -272,6 +272,19 @@ class AnthropicModel:
         resp = self.client.messages.create(model=req["model"], messages=messages, **kw)
         out = _Anthropic.response(resp)
         return Reply(out["text"], out["tool_calls"], out["stop_reason"], out["raw"])
+
+
+def client_timeout(sdk: Any) -> Any:
+    """How long a rerun waits: 10 seconds to connect, and RUNTAPE_TIMEOUT seconds (default 300) for the reply.
+    The SDKs' default of 10 minutes, retried, let one request cut off by a network drop stall a run for an hour;
+    a slow local model can need more, so it's settable. Built with the SDK's own Timeout class (the SDKs have
+    moved between HTTP libraries)."""
+    read = float(os.environ.get("RUNTAPE_TIMEOUT") or 300)
+    make = getattr(sdk, "Timeout", None)
+    try:
+        return make(read, connect=10.0) if make else read
+    except TypeError:
+        return read
 
 
 class OpenAIChatModel:
@@ -294,9 +307,9 @@ class OpenAIChatModel:
         import openai
 
         if self.endpoint:  # a local or self-hosted server: it usually ignores the key
-            return openai.OpenAI(base_url=self.endpoint, max_retries=8,
+            return openai.OpenAI(base_url=self.endpoint, max_retries=8, timeout=client_timeout(openai),
                                  api_key=os.environ.get("OPENAI_API_KEY") or "local")
-        return openai.OpenAI(max_retries=8)
+        return openai.OpenAI(max_retries=8, timeout=client_timeout(openai))
 
     def _kw(self, req: dict) -> dict:
         kw = _filter_params(req["params"], _OPENAI_PARAMS) if req.get("api") == "langchain" else dict(req["params"])
@@ -345,9 +358,9 @@ class OpenAIResponsesModel:
         import openai
 
         if self.endpoint:  # a local or self-hosted server: it usually ignores the key
-            return openai.OpenAI(base_url=self.endpoint, max_retries=8,
+            return openai.OpenAI(base_url=self.endpoint, max_retries=8, timeout=client_timeout(openai),
                                  api_key=os.environ.get("OPENAI_API_KEY") or "local")
-        return openai.OpenAI(max_retries=8)
+        return openai.OpenAI(max_retries=8, timeout=client_timeout(openai))
 
     def __call__(self, req: dict) -> Reply:
         from .integrations import _OpenAIResponses
