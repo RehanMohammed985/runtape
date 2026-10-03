@@ -182,6 +182,9 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
     if json_out:
         Path(json_out).write_text(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
         c.print(Text(f"report written to {json_out}", style="dim"))
+    if any(x.kind == "decisive" for x in rep.causes) and not rep.stopped:
+        c.print(Text(f"Next: runtape fix {trace.path} {event} checks which fixes stop it (these reruns are "
+                     "reused), and --write-test keeps it fixed.", style="dim"))
     return 0
 
 

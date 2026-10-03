@@ -99,7 +99,8 @@ last call to that tool), or `last` (the last model response).
 | `--fill TEXT` | replacement for a removed message or tool result: `marker` (default), `empty`, or any text |
 | `--max-pieces N` | test at most N pieces, most suspicious first (default 80) |
 | `--expand N` | look inside N pieces for masked causes (default 6) |
-| `--full` | keep searching after the main cause is settled: hidden causes and combinations |
+| `--full` | test every piece and keep searching after the main cause is settled: hidden causes and combinations |
+| `--no-guess` | don't start from the model's own guess at the cause; test every piece |
 | `--all` | list every piece tested |
 | `--json FILE` | also write the report as JSON |
 | `--model-fn module:function` | rerun with a Python function instead of the recorded model |

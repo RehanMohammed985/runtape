@@ -31,6 +31,13 @@ response. runtape works on your agent's own runs, recorded by runtape or
 imported from OpenTelemetry or Langfuse, on your machine, and is meant for
 investigating a specific failure and keeping it fixed.
 
+Why not ask a model what caused it? On AgentDojo, asking the agent's own
+model which piece made it act named the injected text in 18 of 23 attacks,
+and runtape in 20. A model's answer is a guess: it carries no evidence, and
+there is nothing to check a fix against. runtape starts from that guess and
+reruns the decision without the text it names. If the decision goes away,
+that's the cause, with the reruns to show it. If not, it tests every piece.
+
 ## Install
 
 ```
@@ -121,33 +128,41 @@ runtape why <trace> <event>
 `last`. How it works:
 
 1. Rerun the recorded model call on the unchanged context to measure how often
-   the model makes the same decision. If it makes it in under 60% of reruns, it
-   is intermittent (an attack that works one run in three is still an attack):
-   the rate is measured on 30 reruns, and a piece counts as a cause when
+   the model makes the same decision. Under 80% on the first reruns, the rate
+   is measured on 30. Under 60%, the decision is intermittent (an attack that
+   works one run in three is still an attack): a piece counts as a cause when
    removing it at least halves the rate, confirmed on 30 reruns. Under 15%,
    `why` says the decision is too rare to attribute and stops.
-2. Remove each piece of the context (system prompt, messages, tool results)
+2. Ask the model which piece of its context made it decide, and which
+   sentence. Test that piece first (or, if removing all of it changes nothing,
+   the part holding the quoted sentence) and narrow toward the quote. If it is
+   proven and narrowed to one part the agent read, without which it acts
+   differently, that is the answer. Otherwise go on: the guess used half the
+   significance level and the search below gets the other half. `--no-guess`
+   skips this step.
+3. Remove each piece of the context (system prompt, messages, tool results)
    and rerun: 2 runs to screen, more where the decision changes.
-3. Confirm candidates with a one-sided Fisher exact test, corrected for every
-   variant tried, so randomness in the model isn't reported as a cause. The
-   evidence is checked twice, after 5 and after 10 reruns, each with its own
-   share of the significance level, so clear effects stop early.
-4. Narrow each confirmed piece down to JSON items, paragraphs and sentences,
+4. Confirm candidates with a one-sided Fisher exact test at 1% (0.5% for an
+   intermittent decision), corrected for every variant tried, so randomness
+   in the model isn't reported as a cause. The evidence is checked twice,
+   after 5 and after 10 reruns, each with its own share of the significance
+   level, so clear effects stop early.
+5. Narrow each confirmed piece down to JSON items, paragraphs and sentences,
    most suspicious first, stopping at the first one that holds.
-5. Look inside pieces whose removal changes nothing, for a cause hidden next
+6. Look inside pieces whose removal changes nothing, for a cause hidden next
    to content that pushes the other way.
-6. Find causes that repeat or that are each enough on their own.
-7. Lead with the piece that changes what the agent does, and among those, one
+7. Find causes that repeat or that are each enough on their own.
+8. Lead with the piece that changes what the agent does, and among those, one
    narrowed to a sentence or item before a whole message or tool result that
    all mattered (the instruction to send the records, not the records). Pieces
    it only needs as input (without them it stops or looks the data up again)
    are listed as also required.
-8. Rerun the headline cause with a second replacement text, when removal left
+9. Rerun the headline cause with a second replacement text, when removal left
    one, and flag it if the result doesn't hold.
 
-Steps 5 and 6 are skipped when the main cause is already settled: one sentence
+Steps 6 and 7 are skipped when the main cause is already settled: one sentence
 or item the agent read, without which it takes a different action. `--full`
-runs them anyway, reusing the reruns already made.
+tests every piece and runs them anyway, reusing the reruns already made.
 
 Only the selected model call is rerun. Your agent and its tools don't run
 again, so nothing is refunded, emailed or deleted twice.
@@ -249,7 +264,9 @@ bad call never happens in its reruns and the drop is significant; PART means
 it became rarer but still happened. Suggesting a fix is easy; this shows which
 ones hold. In the offline ops example, the untrusted-content rule fails (the
 stand-in model treats the team's runbook as trusted) while the action guard
-passes.
+passes. On AgentDojo, fixes this check rated strong let the attack through 27%
+of the time when the whole task was run again, against 53-61% for the rest
+([bench/agentdojo](https://github.com/RehanMohammed985/runtape/blob/main/bench/agentdojo/README.md)).
 
 `--write-test PATH` writes a pytest file for the best passing fix:
 
@@ -290,14 +307,14 @@ output varies, so checks are made over several runs.
   billed once, about 31 requests per decision on the benchmark. With
   Anthropic, repeats read the context from the prompt cache at a tenth of the
   input price. On a local model it is free.
-- Randomness: on a simulated model that ignores its context, no false cause
-  appeared in 100 runs. A cause that moves the decision rate from 90% to 10%
-  was found in 100 of 100 runs; 90% to 30%, in 96 of 100. Decisions the model
-  makes 15-60% of the time are searched on 30 reruns per check: a cause
-  behind a decision made 35% of the time was found in 20 of 20 seeds (about
-  200 model calls each), and noise at 33% gave no cause in 20 of 20. Under 15%
-  they can't be attributed; measure
-  them with `odds` and test suspects with `rerun --drop`.
+- Randomness, on a simulated model, 100 runs per setting: when the context
+  doesn't matter at all, a cause was reported in 0 runs at a 90% decision
+  rate, 1 at 50% and 0 at 33%. A cause that moves the rate from 90% to 10%
+  was found in 97 runs (95 narrowed to exactly that sentence); 90% to 30%, in
+  83; 35% to 0 (an intermittent decision, about 200 model calls), in 89. No
+  run blamed a piece that wasn't the cause; the rest reported no cause.
+  Under 15% a decision can't be attributed; measure it with `odds` and test
+  suspects with `rerun --drop`.
 - Large contexts: pieces are tested top-down and only narrowed where they
   matter. By default at most 80 pieces are tested, ranked by shared wording
   with the decision, always including the system prompt, the task and the
