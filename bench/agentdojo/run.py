@@ -557,7 +557,9 @@ def main(argv=None):
             except (openai.APIConnectionError, openai.RateLimitError) as e:
                 # no network, a request that timed out every retry, or a rate limit that outlasted the client's
                 # retries: wait and try the pair again. Running out of credit is not one of these.
-                if isinstance(e, openai.RateLimitError) and "quota" in str(e).lower():
+                if isinstance(e, openai.RateLimitError) and "insufficient_quota" in str(e):
+                    # OpenAI's out-of-credit error. Other servers say "quota" for per-minute limits too, so
+                    # only this code stops the run
                     _save(out, rows)
                     print(f"{pair}: the model server says the account is out of credit or over its spend limit "
                           f"({str(e)[:200]})")
@@ -571,7 +573,8 @@ def main(argv=None):
                         print(f"{pair}: skipped for now, the model server kept timing out on it", flush=True)
                         continue
                 if offline > 60:
-                    print(f"{pair}: the model server still can't be reached ({e.__cause__ or e}).")
+                    print(f"{pair}: the model server still can't be reached or is still rate limiting, after an "
+                          f"hour of retries; a daily request limit may be used up ({str(e.__cause__ or e)[:200]}).")
                     print("Stopping. Check the connection and run the same command again to continue.")
                     return 1
                 why_ = ("rate limited" if isinstance(e, openai.RateLimitError)

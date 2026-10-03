@@ -241,3 +241,35 @@ def test_older_unstable_rows_are_searched_again(server, tmp_path):
     row, stdout = _run(server, tmp_path)
     assert "intermittent" in row and row["baseline"][0] == row["baseline"][1], row
     assert row["headline_in_injection"] is True and "FOUND" in stdout
+
+
+
+class Throttled(Handler):
+    """Answers the first requests with a per-minute rate limit that mentions quota, as Gemini's does."""
+    left = 6
+
+    def do_POST(self):
+        if Throttled.left > 0:
+            Throttled.left -= 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            data = json.dumps({"error": {"code": 429, "message": "Resource has been exhausted (e.g. check quota).",
+                                         "status": "RESOURCE_EXHAUSTED"}}).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        super().do_POST()
+
+
+def test_rate_limit_that_mentions_quota_is_waited_out(tmp_path):
+    Throttled.left = 20
+    srv = HTTPServer(("127.0.0.1", 0), Throttled)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        row, stdout = _run(f"http://127.0.0.1:{srv.server_port}/v1", tmp_path, "--wait", "1")
+    finally:
+        srv.shutdown()
+    assert "rate limited" in stdout and "out of credit" not in stdout
+    assert row["attacked"] is True and row["headline_in_injection"] is True, row
