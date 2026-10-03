@@ -678,8 +678,8 @@ class Why:
             rep.warnings.append(
                 f"The model never repeated this decision in {self.base_trial.n} reruns of the exact same context, "
                 "so there is nothing to attribute. The original was a rare outcome, or the model/settings changed. "
-                "To measure how rare, run: runtape odds <trace> <event> --runs 20. To test a suspect directly, "
-                "compare that with: runtape rerun <trace> <event> --drop <event> --runs 20."
+                f"To measure how rare, run: runtape odds {self._ref()} --runs 20. To test a suspect directly, "
+                f"compare that with: runtape rerun {self._ref()} --drop <suspect event> --runs 20."
             )
             return
         if self.base < self.unsteady_below and not self.det:
@@ -699,7 +699,7 @@ class Why:
                         f"Unstable decision: the model only repeats it in {self.base_trial.kept}/"
                         f"{self.base_trial.n} reruns of the same context, too rarely for any piece of context to "
                         "be shown to cause it, so the search stopped here. To test a suspect directly, compare "
-                        "runtape odds <trace> <event> --runs 50 with runtape rerun <trace> <event> --drop <event> "
+                        f"runtape odds {self._ref()} --runs 50 with runtape rerun {self._ref()} --drop <suspect event> "
                         "--runs 50."
                     )
                     return
@@ -880,6 +880,13 @@ class Why:
         rep.guided = {"piece": seg.where, "quote": quote}
         return True
 
+    def _ref(self) -> str:
+        """The trace and decision, as the CLI takes them, for commands suggested in warnings."""
+        import shlex
+
+        path = getattr(self.trace, "path", None)
+        return f"{shlex.quote(str(path)) if path else '<trace>'} {self.target.response_id}"
+
     def _warn_unstable(self, rep: Report) -> None:
         if self.intermittent:
             return  # said already, with what the causes mean
@@ -887,7 +894,7 @@ class Why:
             rep.warnings.append(
                 f"Unstable decision: the model only repeats it in {self.base_trial.kept}/{self.base_trial.n} reruns of "
                 "the same context. Causes need stronger evidence to show up; raise --runs, or test a suspect "
-                "directly with runtape rerun <trace> <event> --drop <event> --runs 20."
+                f"directly with runtape rerun {self._ref()} --drop <suspect event> --runs 20."
             )
 
     def _explains(self, c: Cause) -> bool:

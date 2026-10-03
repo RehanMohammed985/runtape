@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 from rich.console import Group, RenderableType
 from rich.markup import escape
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
@@ -183,7 +184,10 @@ def timeline_row(trace: Trace, e: Event, cursor: int | None = None, width: int =
     mark = ">" if cursor == e.id else " "
     row = Text(f"{mark}{e.id:>4} ", style="bold" if mark == ">" else "dim", no_wrap=True, overflow="ellipsis")
     row.append(f"{e.type:<13}", style=TYPE_STYLE.get(e.type, ""))
-    row.append(" " + oneline(e, width))
+    desc = oneline(e, width)
+    if len(desc) > width:  # cut it here, so the terminal doesn't cut it again after our own "..."
+        desc = desc[: width - 3].rstrip(". ") + "..."
+    row.append(" " + desc)
     lat = e.meta.get("latency_ms") if isinstance(e.meta, dict) else None
     if lat is not None:
         row.append(f"  {lat:.0f}ms", style="dim")
@@ -469,6 +473,18 @@ def show_summary(trace: Trace) -> RenderableType:
 # ------------------------------------------------------------------- why
 
 
+def _hang(items: list) -> list:
+    """Indented lines keep their indent when they wrap: '  text' becomes text padded by two columns."""
+    out = []
+    for it in items:
+        if isinstance(it, Text):
+            k = len(it.plain) - len(it.plain.lstrip(" "))
+            if 0 < k < len(it.plain):
+                it = Padding(it[k:], (0, 0, 0, k))
+        out.append(it)
+    return out
+
+
 def _ratio(kept: int, n: int) -> str:
     return f"{kept}/{n}"
 
@@ -683,10 +699,8 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
                         "combinations of pieces (reruns made so far are reused).", style="dim"))
     in_requests = f" in {rep.requests} requests" if 0 < getattr(rep, "requests", 0) < rep.calls else ""
     tail = f"{rep.calls} model calls{in_requests}, {rep.cache_hits} from cache."
-    if rep.stopped:
-        tail += f" Stopped early: {rep.stopped}. Raise --budget to finish."
     out.append(Text(tail, style="dim"))
-    return Group(*out)
+    return Group(*_hang(out))
 
 
 def show_distribution(dist, recorded, *, title: str) -> RenderableType:
@@ -701,7 +715,7 @@ def show_distribution(dist, recorded, *, title: str) -> RenderableType:
         if same:
             row.append("  (same as recorded)", style="dim")
         out.append(row)
-    return Group(*out)
+    return Group(*_hang(out))
 
 
 def show_fix(fr) -> RenderableType:
@@ -727,10 +741,10 @@ def show_fix(fr) -> RenderableType:
         out.append(Text("  " + clip('"' + " ".join(" ".join(s.text.split()) for s in t.removed) + '"', 300)))
     if b.kept == 0:
         out.append(Text("The model doesn't repeat this decision, so there is nothing to fix or measure.", style="yellow"))
-        return Group(*out)
+        return Group(*_hang(out))
     if not fr.candidates:
         out.append(Text("No cause was found to base a fix on. Test a change directly with runtape rerun.", style="yellow"))
-        return Group(*out)
+        return Group(*_hang(out))
     out.append(Rule(style="dim"))
     goal = fr.without_cause()
     if goal:
@@ -775,4 +789,4 @@ def show_fix(fr) -> RenderableType:
                         "finished reruns are cached.", style="yellow"))
     out.append(Text(f"{rep.calls + fr.calls} model calls ({rep.calls} finding the cause, {fr.calls} checking fixes), "
                     f"{rep.cache_hits + fr.cache_hits} from cache.", style="dim"))
-    return Group(*out)
+    return Group(*_hang(out))

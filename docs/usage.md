@@ -85,8 +85,12 @@ set `RUNTAPE_TIMEOUT` (seconds).
 runtape why <trace> <event> [options]
 ```
 
-`<trace>` is a path or `last`. `<event>` is an event number, `tool:NAME` (the
-last call to that tool), or `last` (the last model response).
+`<trace>` is a path, part of a file name in `./traces` (a run id, say), or
+`last` for the newest. `<event>` is an event number, `tool:NAME` (the last call
+to that tool), or `last` (the last model response). When the agent calls the
+same tool many times (`run_command`, `search`), `tool:NAME` asks whether it
+calls that tool at all; add `--match` with part of the arguments to explain one
+call, as `why` suggests when this applies.
 
 | option | |
 |---|---|
@@ -103,9 +107,28 @@ last call to that tool), or `last` (the last model response).
 | `--no-guess` | don't start from the model's own guess at the cause; test every piece |
 | `--all` | list every piece tested |
 | `--json FILE` | also write the report as JSON |
-| `--model-fn module:function` | rerun with a Python function instead of the recorded model |
+| `--model-fn module:function` | rerun with a Python function instead of the recorded model (below) |
 | `--no-cache` | don't reuse cached replies |
+| `-y` | don't ask before making model calls |
 
+Replies are cached in `.runtape/cache` in the folder you run from, so a repeat
+run, or `fix` after `why`, doesn't pay twice. Add `.runtape/` to `.gitignore`.
+
+### Model functions
+
+`--model-fn path/to/file.py:name` (or `package.module:name`) reruns with your
+own function instead of the API the trace was recorded with: a local model, a
+proxy, or a stand-in for tests. It gets the request as a dict (`model`,
+`messages`, `system`, `tools` and `params`, in the format the agent sent them)
+and returns a string, or a dict:
+
+```python
+def my_model(req):
+    return {"text": "...", "tool_calls": [{"id": "call_1", "name": "issue_refund",
+                                            "arguments": {"order_id": "Z-9", "amount": 900}}]}
+```
+
+The examples' `simulated_model` functions are small instances of this.
 ## runtape rerun and odds
 
 ```
@@ -144,7 +167,8 @@ every run (no cache).
 In Python: `runtape.fix(trace, event, model=..., runs=10)` returns a report with
 `candidates` (each with `kept`, `n`, `p` and `holds()`) and `best`;
 `runtape.write_test(trace_path, event, target, out, add_system=...)` writes the
-test.
+test. `target` is the decision: the report's `report.target`, or
+`make_target(trace, event, tool=..., match=...)` from `runtape.why`.
 
 ## Replay a whole run
 

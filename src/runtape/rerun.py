@@ -404,11 +404,13 @@ def load_model_fn(spec: str) -> Model:
     """'package.module:function' -> FunctionModel. Also accepts 'path/to/file.py:function'."""
     mod_name, _, attr = spec.partition(":")
     if not attr:
-        raise ValueError("model function must look like module:function")
+        raise ValueError(f"--model-fn '{spec}' should look like file.py:function or module:function")
     if mod_name.endswith(".py") or os.sep in mod_name:
         import importlib.util
         import sys
 
+        if not Path(mod_name).is_file():
+            raise ValueError(f"--model-fn: no file {mod_name} (from {Path.cwd()})")
         folder = str(Path(mod_name).resolve().parent)
         if folder not in sys.path:
             sys.path.insert(0, folder)  # so the file can import its neighbors
@@ -416,7 +418,13 @@ def load_model_fn(spec: str) -> Model:
         mod = importlib.util.module_from_spec(spec_)
         spec_.loader.exec_module(mod)
     else:
-        mod = importlib.import_module(mod_name)
+        try:
+            mod = importlib.import_module(mod_name)
+        except ModuleNotFoundError as e:
+            raise ValueError(f"--model-fn: can't import {mod_name} ({e}). For a file, give its path: "
+                             f"path/to/{mod_name}.py:{attr}") from None
+    if not hasattr(mod, attr):
+        raise ValueError(f"--model-fn: {mod_name} has no '{attr}'")
     obj = getattr(mod, attr)
     if isinstance(obj, type):
         obj = obj()
@@ -802,7 +810,7 @@ def rerun(
     event_id: int,
     *,
     runs: int = 5,
-    drop: Iterable[str] = (),
+    drop: "str | Iterable[str]" = (),
     replace: dict[str, str] | None = None,
     system: str | None = None,
     model_name: str | None = None,
@@ -821,6 +829,8 @@ def rerun(
     """
     if not isinstance(trace, Trace):
         trace = Trace.load(trace)
+    if isinstance(drop, (str, int)):  # one reference, not a list of characters
+        drop = [str(drop)]
     rid, resp = request_for(trace, event_id)
     req, notes = edited_request(trace, rid, drop=drop, replace=replace, system=system, model_name=model_name,
                                 fill=fill, add_system=add_system)

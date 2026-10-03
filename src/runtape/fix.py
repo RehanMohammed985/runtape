@@ -16,6 +16,7 @@ turns a passing fix into a pytest file that reruns the recorded decision against
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from collections import Counter
@@ -261,11 +262,14 @@ def drop_refs(trace: Trace, request_id: int, segments: list) -> list[str]:
     return refs
 
 
-def _abs_model_fn(spec: str) -> str:
+def _model_fn_expr(spec: str, test_dir: Path) -> str:
+    """The test's MODEL line argument: a file is found relative to the test, so the test still works when the
+    project is cloned elsewhere; a module name is kept as it is."""
     mod, _, attr = spec.rpartition(":")
     if mod.endswith(".py") or "/" in mod or "\\" in mod:
-        mod = str(Path(mod).resolve())
-    return f"{mod}:{attr}"
+        rel = Path(os.path.relpath(Path(mod).resolve(), test_dir.resolve())).as_posix()
+        return f"str(Path(__file__).parent / {rel!r}) + {':' + attr!r}"
+    return repr(spec)
 
 
 def unique_path(path: str | Path) -> Path:
@@ -312,7 +316,9 @@ def write_test(
                 "Add the same text to your agent's system prompt. To test your agent's actual prompt instead,",
                 "pass it: runtape.rerun(TRACE, EVENT, system=YOUR_PROMPT, runs=RUNS, cache_dir=None)."]
     elif drop:
-        doc += ["", "The fix is at the source: the recorded decision is rerun without the content that caused it."]
+        doc += ["", "The fix is at the source: the recorded decision is rerun without the content that caused it,",
+                "so this fails if the model makes the call even without it. It can't see your source: if the",
+                "content can come back there, test for it where it comes from."]
     else:
         doc += ["", "No fix is applied: this reruns the recorded decision as it was, so it fails while the model",
                 "still makes this decision on this context (for example, to check a new model)."]
@@ -330,7 +336,7 @@ def write_test(
         lines.append(f"DROP = {drop!r}")
         args.append("drop=DROP")
     if model_fn:
-        lines.append(f"MODEL = load_model_fn({_abs_model_fn(model_fn)!r})")
+        lines.append(f"MODEL = load_model_fn({_model_fn_expr(model_fn, out.parent)})")
         args.append("model=MODEL")
     lines += ["", "", f"def test_never_{test_name(target)}():",
               f"    # fails if, in any of RUNS reruns of the recorded decision, the agent {what}",

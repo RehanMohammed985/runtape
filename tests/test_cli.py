@@ -281,3 +281,100 @@ def test_trace_path_after_global_option(demo, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
     code, out = run("--no-color", str(demo))
     assert code == 0 and "refund-bot  ok" in out
+
+
+# ---- what a new user runs into (from a fresh-install pass over the README)
+
+
+def test_next_hint_keeps_the_options_that_were_passed(demo):
+    """The suggested `fix` command runs as printed: same event spec, same model function."""
+    code, out = run("why", str(demo), "tool:issue_refund", "--model-fn", SIM)
+    hint = " ".join(out[out.index("Next:"):].split())
+    assert f"runtape fix {demo} tool:issue_refund --model-fn {SIM}" in hint, hint
+    code, out = run("fix", str(demo), "tool:issue_refund", "--model-fn", SIM)
+    hint = " ".join(out[out.index("Turn it into a test:"):].split())
+    assert f"tool:issue_refund --model-fn {SIM} --write-test" in hint, hint
+
+
+def test_reruns_that_cannot_start_say_why_before_asking(demo, monkeypatch):
+    # the example's stand-in model has no API: point at --model-fn instead of asking for a key
+    code, out = run("why", str(demo), "31", "-y")
+    assert code == 1 and "stand-in model" in out and "--model-fn" in out
+    # a real trace with no key set: name the variable, before any prompt or spinner
+    t = Recorder(Path("traces/real.jsonl"))
+    rid = t.log_llm_request(provider="openai", api="chat.completions", model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": "hi"}])
+    t.log_llm_response(rid, text="hello", tool_calls=[], stop_reason="stop", raw=None, latency_ms=1)
+    t.close()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    code, out = run("why", "traces/real.jsonl", "last")
+    assert code == 1 and "OPENAI_API_KEY isn't set" in out and "Continue?" not in out
+    code, out = run("rerun", "traces/real.jsonl", "last")
+    assert code == 1 and "OPENAI_API_KEY isn't set" in out
+
+
+def test_errors_name_what_exists(demo):
+    code, out = run("why", str(demo), "issue_refund", "--model-fn", SIM)
+    assert code == 1 and "tool:issue_refund" in out
+    code, out = run("why", str(demo), "tool:Issue_Refund", "--model-fn", SIM)
+    assert code == 1 and "It has:" in out and "issue_refund" in out
+    code, out = run("why", str(demo), "31", "--model-fn", SIM, "--match", "[")
+    assert code == 1 and "--match '[' isn't a valid regular expression" in out
+    code, out = run("why", str(demo), "31", "--model-fn", "nope.py:f")
+    assert code == 1 and "no file nope.py" in out
+    code, out = run("why", str(demo), "31", "--model-fn", SIM.rsplit(":", 1)[0] + ":nope")
+    assert code == 1 and "has no 'nope'" in out
+    code, out = run("import", "missing.json")
+    assert code == 1 and out.strip() == "No such file: missing.json"
+
+
+def test_a_generic_tool_gets_a_match_suggestion(tmp_path, monkeypatch):
+    """Explaining one of many run_command calls: say that any call counts, and how to explain this one."""
+    monkeypatch.chdir(tmp_path)
+    t = Recorder(Path("traces/ops.jsonl"))
+    msgs = [{"role": "user", "content": "fix the deploy"}]
+    for i, cmd in enumerate(["make test", "make db-reset"]):
+        rid = t.log_llm_request(provider="openai", api="chat.completions", model="m", messages=list(msgs))
+        call = {"id": f"c{i}", "name": "run_command", "arguments": {"command": cmd}}
+        reply = t.log_llm_response(rid, text=None, tool_calls=[call], stop_reason="tool_calls", raw=None,
+                                   latency_ms=1)
+        t.log("tool_call", {"name": "run_command", "arguments": {"command": cmd}, "call_id": f"c{i}"},
+              meta={"requested_by": reply})
+        msgs += [{"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {"name": "run_command", "arguments": "{}"}}]},
+                 {"role": "tool", "tool_call_id": f"c{i}", "content": "ok"}]
+    t.close()
+    from runtape import Trace
+
+    tr = Trace.load("traces/ops.jsonl")
+    note = cli.generic_tool_note(tr, cli.resolve_event(tr, "tool:run_command"))
+    assert "called 2 times" in note and "--match 'make db-reset'" in note
+    assert cli.generic_tool_note(tr, 2, match="db-reset") is None
+
+
+def test_replay_why_takes_a_model_function(demo):
+    out = replay(demo, f"why 31 --model-fn {SIM}\nwhy 31 --bogus\nq\n")
+    assert "CAUSE  #9 search_kb result[1].text sentence 2" in out
+    assert "unrecognized arguments: --bogus" in out and "why: 2" not in out
+
+
+def test_last_and_part_of_a_name_open_the_replay(demo, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    assert run("last")[1].count("refund-bot  ok") == 1
+    monkeypatch.setattr("sys.stdin", io.StringIO("q\n"))
+    assert "refund-bot  ok" in run("refund-bot")[1]
+
+
+def test_a_test_finds_its_model_function_relative_to_itself(demo, tmp_path):
+    code, out = run("fix", str(demo), "31", "--model-fn", SIM, "--write-test", "tests/test_refund.py")
+    text = Path("tests/test_refund.py").read_text()
+    assert "Path(__file__).parent / " in text and str(tmp_path) not in text and code == 0
+
+
+def test_rerun_takes_one_reference_as_a_string(demo):
+    import runtape
+
+    d = runtape.rerun(demo, 30, drop="9[1]", model=__import__("runtape.rerun", fromlist=["load_model_fn"])
+                      .load_model_fn(SIM), cache_dir=None, runs=2)
+    assert d.notes == ["dropped #9 search_kb result[1]"]

@@ -41,3 +41,5 @@ exclude = ["bench/traces", "bench/results", "bench/seed1", "bench/agentdojo/trac
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+# without pytest-asyncio (a plain `pip install . pytest`), the option is unknown: no need to warn
+filterwarnings = ["ignore:Unknown config option. asyncio_mode:pytest.PytestConfigWarning"]

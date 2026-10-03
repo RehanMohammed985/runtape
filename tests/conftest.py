@@ -1,8 +1,13 @@
 """Fake HTTP backends so the real OpenAI/Anthropic SDKs run offline."""
 import json
 
-import httpx
 import pytest
+
+
+def _hx(sdk):
+    """The HTTP library the SDK itself uses (newer SDKs moved from httpx to httpx2)."""
+    base = sdk._base_client
+    return getattr(base, "httpx2", None) or getattr(base, "httpx", None) or __import__("httpx")
 
 
 class Script:
@@ -34,20 +39,18 @@ def _sse(ev):
 def openai_client(script, async_=False):
     import openai
 
+    hx = _hx(openai)
     if async_:
         return openai.AsyncOpenAI(
-            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(script.handler))
+            api_key="test", http_client=hx.AsyncClient(transport=hx.MockTransport(script.handler))
         )
-    return openai.OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(script.handler)))
+    return openai.OpenAI(api_key="test", http_client=hx.Client(transport=hx.MockTransport(script.handler)))
 
 
 def anthropic_client(script, async_=False):
     import anthropic
 
-    try:  # newer anthropic SDKs moved to httpx2
-        import httpx2 as hx
-    except ImportError:
-        hx = httpx
+    hx = _hx(anthropic)
 
     if async_:
         return anthropic.AsyncAnthropic(

@@ -53,7 +53,8 @@ custom agent loops.
 ```
 git clone https://github.com/RehanMohammed985/runtape
 cd runtape
-pip install . openai anthropic
+python -m venv .venv && source .venv/bin/activate
+pip install . openai anthropic pytest
 
 python examples/inbox_agent.py
 runtape why last tool:forward_email --model-fn examples/inbox_agent.py:simulated_model
@@ -68,7 +69,7 @@ pytest tests/test_inbox.py
 | `ops_agent.py` | an operations agent drops a shared staging database, following an old runbook line |
 
 By default the examples run offline with a rule-based stand-in model
-(`--model-fn`). To run them on a real model, add `--local MODEL` (Ollama,
+(`--model-fn`), and each prints the commands for its failure. To run them on a real model, add `--local MODEL` (Ollama,
 free), `--openai MODEL` or `--anthropic MODEL`. Real models don't fail every
 time, so `examples/hunt.py` runs an example until it fails, reports the tokens
 used, and prints the `why` command:

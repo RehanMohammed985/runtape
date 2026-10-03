@@ -56,6 +56,8 @@ class Call:
     source: str = ""
     span_id: str | None = None
     parent_span: str | None = None
+    end: float | None = None  # seconds, like start
+    tokens: dict | None = None  # {"input": n, "output": n}
 
 
 @dataclass
@@ -314,6 +316,7 @@ def _spans(data: Any) -> list[dict]:
                                     "span_id": s.get("spanId") or s.get("span_id"),
                                     "parent": s.get("parentSpanId") or s.get("parent_span_id"),
                                     "name": s.get("name"), "start": _time(s.get("startTimeUnixNano")),
+                                    "end": _time(s.get("endTimeUnixNano")),
                                     "attrs": _attrs(s.get("attributes")), "events": s.get("events") or [],
                                     "resource": res})
         elif "attributes" in item and ("name" in item or "context" in item):
@@ -323,6 +326,7 @@ def _spans(data: Any) -> list[dict]:
                         "parent": item.get("parent_id") or item.get("parentSpanId"),
                         "name": item.get("name"),
                         "start": _time(item.get("start_time") or item.get("startTimeUnixNano")),
+                        "end": _time(item.get("end_time") or item.get("endTimeUnixNano")),
                         "attrs": _attrs(item.get("attributes")), "events": item.get("events") or [],
                         "resource": _attrs((item.get("resource") or {}).get("attributes"))})
     return out
@@ -471,7 +475,20 @@ def _span_call(s: dict) -> Call | None:
     return Call(start=s["start"], model=model, provider=_provider(a), messages=openai_messages(messages),
                 tools=openai_tools(tools), params=_clean_params(params), text=text, tool_calls=calls,
                 stop_reason=stop, trace_id=s.get("trace_id"), source=source, span_id=s.get("span_id"),
-                parent_span=s.get("parent"))
+                parent_span=s.get("parent"), end=s.get("end"), tokens=_usage(a))
+
+
+def _usage(a: dict) -> dict | None:
+    """Token counts from the GenAI, OpenLLMetry or OpenInference attributes."""
+    def first(*keys):
+        for k in keys:
+            v = a.get(k)
+            if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()):
+                return int(v)
+        return None
+    tin = first("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens", "llm.token_count.prompt")
+    tout = first("gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens", "llm.token_count.completion")
+    return {"input": tin, "output": tout} if tin is not None or tout is not None else None
 
 
 def _event_messages(s: dict) -> list[dict]:
@@ -555,7 +572,8 @@ def _langfuse_calls(data: Any) -> list[Call]:
             tool_calls=[{"id": tc["id"], "name": tc["function"]["name"], "arguments": _args_dict(tc["function"]["arguments"])}
                         for tc in r.get("tool_calls") or []],
             stop_reason=(outp or {}).get("finish_reason") if isinstance(outp, dict) else None,
-            trace_id=o.get("traceId"), source="Langfuse"))
+            trace_id=o.get("traceId"), source="Langfuse", end=_time(o.get("endTime")) if o.get("endTime") else None,
+            tokens=_langfuse_usage(o)))
     return out
 
 
@@ -595,6 +613,15 @@ def load_source(source: str) -> Any:
         return items
 
 
+def _langfuse_usage(o: dict) -> dict | None:
+    u = o.get("usageDetails") or o.get("usage") or {}
+    tin = u.get("input") if isinstance(u, dict) else None
+    tout = u.get("output") if isinstance(u, dict) else None
+    tin = tin if tin is not None else o.get("promptTokens")
+    tout = tout if tout is not None else o.get("completionTokens")
+    return {"input": tin, "output": tout} if tin is not None or tout is not None else None
+
+
 def read_calls(data: Any) -> tuple[str, list[Call]]:
     """(the format found, the model calls in it, in order)."""
     obs = data.get("observations") if isinstance(data, dict) else data if isinstance(data, list) else None
@@ -607,6 +634,8 @@ def read_calls(data: Any) -> tuple[str, list[Call]]:
             flat.extend(d if isinstance(d, list) else [d])
         spans = _spans(flat)
         calls = [c for c in (_span_call(s) for s in spans) if c]
+        if not spans:
+            return "nothing", []
         # a framework's span around the provider's span for the same call: keep the innermost
         parent_of = {s["span_id"]: s.get("parent") for s in spans if s.get("span_id")}
         llm = {c.span_id for c in calls if c.span_id}
@@ -665,8 +694,9 @@ def write_trace(calls: list[Call], path: str | os.PathLike, *, name: str, provid
             else:
                 rid = rec.log_llm_request(provider="openai", api="chat.completions", model=c.model, messages=c.messages,
                                           tools=defs, params=params, endpoint=endpoint or c.endpoint)
+            took = (c.end - c.start) * 1000 if c.end and c.start and c.end >= c.start else 0
             reply = rec.log_llm_response(rid, text=c.text, tool_calls=c.tool_calls, stop_reason=c.stop_reason,
-                                         raw=None, latency_ms=0, model=c.model)
+                                         raw=None, latency_ms=took, model=c.model, tokens=c.tokens)
             for tc in c.tool_calls:
                 pending[tc["id"]] = (tc, reply)
         # tool calls with no later request: the run ended on them (or the result was never sent back)
@@ -687,6 +717,10 @@ def import_trace(source: str, out: str | os.PathLike | None = None, *, trace_id:
     """Import a trace (or every trace in an export) and write runtape traces. Returns one entry per trace."""
     data = load_source(source)
     fmt, calls = read_calls(data)
+    if fmt == "nothing":
+        raise ValueError(f"No OpenTelemetry spans or Langfuse generations in {source}. runtape import reads an "
+                         "OTLP JSON export, the OpenTelemetry console exporter's output, or a Langfuse trace; a "
+                         "runtape trace needs no import.")
     if not calls:
         raise ValueError(
             f"No model calls with their messages in {source}. runtape needs the prompts and replies: turn on "

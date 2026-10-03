@@ -245,6 +245,7 @@ def simulated_model(req):
 
 
 def main(trace_path=None, provider="simulated", model="simulated", local_url="http://localhost:11434/v1"):
+    _agent.check_provider(provider, model, local_url)
     rec = runtape.record(trace_path, name=f"ops-agent-{provider}", tags={"example": True, "provider": provider})
     backend = _agent.simulated_backend(simulated_model) if provider == "simulated" else None
     client = _agent.make_client(rec, provider, local_url=local_url, http_client=backend)
@@ -280,7 +281,7 @@ if __name__ == "__main__":
     ev = destructive_call(path)
     if ev is not None:
         print("The agent wiped the shared staging database. Find out why:")
-        fn = " --model-fn examples/ops_agent.py:simulated_model" if provider == "simulated" else ""
+        fn = _agent.model_fn_arg(__file__) if provider == "simulated" else ""
         print(f"  runtape why {path} {ev} --match 'db-reset|dropdb'" + fn)
         print("Then check fixes and write a regression test:")
         print(f"  runtape fix {path} {ev} --match 'db-reset|dropdb'" + fn + " --write-test tests/test_ops.py")

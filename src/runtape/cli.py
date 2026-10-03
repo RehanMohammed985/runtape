@@ -28,13 +28,84 @@ TYPE_ALIASES = {
 }
 
 
+def _sdk_of(e: BaseException) -> tuple[str, str]:
+    """(provider name, key variable) for an exception raised by the OpenAI or Anthropic SDK."""
+    mod = type(e).__module__ or ""
+    if mod.startswith("anthropic"):
+        return "Anthropic", "ANTHROPIC_API_KEY"
+    return "OpenAI", "OPENAI_API_KEY"
+
+
 def friendly(e: BaseException) -> str:
-    msg = str(e)
+    """One plain line for an error, instead of a traceback or an SDK's raw message."""
+    name, msg = type(e).__name__, str(e)
     low = msg.lower()
-    if "api_key" in low or "authentication" in low or "auth_token" in low:
-        msg = ("No API key for the model this decision was made with. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, "
-               "or pass --model-fn to use a local function.")
-    return f"{type(e).__name__}: {msg}"
+    if isinstance(e, FileNotFoundError):
+        return f"No such file: {e.filename}" if e.filename else msg
+    if name == "AuthenticationError" or getattr(e, "status_code", None) == 401:
+        who, var = _sdk_of(e)
+        return (f"The {who} API rejected the key in {var} (401). Check the key, or pass --model-fn "
+                "module:function to rerun with your own model function.")
+    if name in ("APIConnectionError", "APITimeoutError"):
+        url = getattr(getattr(e, "request", None), "url", None)
+        where = f" at {url.scheme}://{url.netloc.decode() if isinstance(url.netloc, bytes) else url.netloc}" if url else ""
+        return (f"Can't reach the model server{where}. Check your connection, or that the server is running "
+                "(a local server like Ollama needs to be started first).")
+    if "api_key" in low or "auth_token" in low:
+        who, var = _sdk_of(e)
+        return f"No {who} API key: set {var}, or pass --model-fn module:function to rerun with your own model function."
+    return f"{name}: {msg}"
+
+
+def need_key(req: dict) -> str | None:
+    """Why reruns of this request can't start here, if they can't: the trace came from the examples' stand-in
+    model, or the API it goes to needs a key that isn't set."""
+    if req.get("model") in ("simulated", "claude-scripted"):
+        return ("This trace was recorded with the examples' stand-in model, which has no API. Add the --model-fn "
+                "the example printed (for example --model-fn examples/inbox_agent.py:simulated_model).")
+    if req.get("endpoint"):  # a local or self-hosted server: usually no key, but it has to be running
+        from urllib.parse import urlparse
+
+        u = urlparse(req["endpoint"])
+        if u.hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            import socket
+
+            try:
+                socket.create_connection((u.hostname, u.port or (443 if u.scheme == "https" else 80)), 2).close()
+            except OSError:
+                return (f"Nothing is answering at {req['endpoint']}, where reruns of this decision go. Start the "
+                        "server (for Ollama: ollama serve, or open the app), or pass --model-fn module:function.")
+        return None
+    anthropic = req.get("api") == "messages" or req.get("provider") == "anthropic"
+    var = "ANTHROPIC_API_KEY" if anthropic else "OPENAI_API_KEY"
+    if req.get("api") in ("messages", "responses", "chat.completions", "langchain") and not os.environ.get(var):
+        if anthropic and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            return None
+        who = "Anthropic" if anthropic else "OpenAI"
+        return (f"Reruns of this decision go to the {who} API ({req.get('model')}), and {var} isn't set. Set it, "
+                "or pass --model-fn module:function to rerun with your own model function.")
+    return None
+
+
+def _check_regex(pattern: str | None, flag: str = "--match") -> None:
+    if pattern is None:
+        return
+    import re
+
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise SystemExit(f"{flag} '{pattern}' isn't a valid regular expression: {e}.")
+
+
+def carry(**opts) -> str:
+    """The options a user passed, as they'd type them again in a suggested next command."""
+    out = []
+    for flag, val in opts.items():
+        if val in (None, False):
+            continue
+        out.append(f"--{flag.replace('_', '-')}" + ("" if val is True else " " + shlex.quote(str(val))))
+    return (" " + " ".join(out)) if out else ""
 
 
 # ------------------------------------------------------------ resolution
@@ -58,7 +129,10 @@ def resolve_trace(arg: str | None) -> Path:
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise SystemExit(f"'{arg}' matches {len(matches)} traces; be more specific.")
+            names = "\n  ".join(str(t) for t in reversed(matches[-5:]))
+            more = f"\n  ... and {len(matches) - 5} older" if len(matches) > 5 else ""
+            raise SystemExit(f"'{arg}' matches {len(matches)} traces; pass more of the name, or a path, or 'last' "
+                             f"for the newest:\n  {names}{more}")
         raise SystemExit(f"No trace file '{arg}'.")
     traces = find_traces()
     if not traces:
@@ -84,7 +158,10 @@ def resolve_event(trace: Trace, arg: str | int) -> int:
         hits = [e for e in trace.events if e.type == etype
                 and (not name or e.payload.get("name") == name or e.payload.get("key") == name)]
         if not hits:
-            raise SystemExit(f"No {etype} {name!r} in this trace.")
+            there = sorted({e.payload.get("name") or e.payload.get("key") or "" for e in trace.events
+                            if e.type == etype} - {""})
+            listed = f" It has: {', '.join(there)}." if there else ""
+            raise SystemExit(f"No {etype} {name!r} in {trace.path}.{listed}")
         return hits[-1].id
     try:
         n = int(arg)
@@ -93,7 +170,10 @@ def resolve_event(trace: Trace, arg: str | int) -> int:
             return trace.events[-1].id
         if arg in ("first", "start"):
             return trace.events[0].id
-        raise SystemExit(f"'{arg}' is not an event number.")
+        tools = sorted({e.payload.get("name") for e in trace.events if e.type == "tool_call"} - {None})
+        hint = f" For the last call of a tool, use tool:NAME (tool:{arg})." if arg in tools else (
+            " Use an event number, 'last', or tool:NAME" + (f" (tools called: {', '.join(tools)})." if tools else "."))
+        raise SystemExit(f"'{arg}' is not an event number.{hint}")
     if n < 0:
         if -n > len(trace.events):
             raise SystemExit(f"No event #{n}. Trace has {len(trace.events)} events.")
@@ -124,12 +204,44 @@ def _parse_replace(items: list[str] | None) -> dict[str, str]:
     return out
 
 
+def generic_tool_note(trace: Trace, event: int, tool=None, match=None) -> str | None:
+    """When the decision is a call to a tool the agent calls many times with other arguments (run_command,
+    search), the default question (does it call the tool at all?) is usually not the one meant."""
+    if tool or match:
+        return None
+    from .why import make_target
+
+    try:
+        t = make_target(trace, event)
+    except ValueError:
+        return None
+    if t.mode != "tool" or t.args is not None:
+        return None
+    this = next((tc.get("arguments") for tc in t.recorded.tool_calls if tc.get("name") == t.tool), None)
+    calls = [e for e in trace.of_type("tool_call") if e.payload.get("name") == t.tool]
+    others = [e.payload.get("arguments") for e in calls if e.payload.get("arguments") != this]
+    if not others or not isinstance(this, dict):
+        return None
+    import re
+
+    seen = json.dumps(others, ensure_ascii=False)
+    val = next((v for v in this.values() if isinstance(v, str) and 2 < len(v) <= 60 and v not in seen), None)
+    if val is None:
+        return None
+    pattern = val if all(ch.isalnum() or ch in " -_/:=@,'\"" for ch in val) else re.escape(val)
+    return (f"{t.tool} is called {len(calls)} times in this run, with different arguments, and this counts any call "
+            f"to it. To explain this call only, add --match {shlex.quote(pattern)}.")
+
+
 def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=None, exact_args=False,
             model_fn=None, budget=400, cache=True, yes=False, show_all=False, json_out=None,
-            max_pieces=80, dry=False, expand=6, fill=None, full=False, guess=True) -> int:
+            max_pieces=80, dry=False, expand=6, fill=None, full=False, guess=True, event_arg=None) -> int:
     from .rerun import build_request, request_for
     from .why import estimate_calls, why
 
+    _check_regex(match)
+    if json_out:
+        Path(json_out).parent.mkdir(parents=True, exist_ok=True)
     if dry:
         from .why import suspects
 
@@ -152,8 +264,14 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
     rid, _ = request_for(trace, event)
     likely, worst = estimate_calls(trace, event, runs=runs, max_pieces=max_pieces, full=full)
     live = model is None
+    note = generic_tool_note(trace, event, tool, match)
+    if note:
+        c.print(Text("! " + note, style="yellow"))
     if live:
         req = build_request(trace, rid)
+        blocked = need_key(req)
+        if blocked:
+            raise SystemExit(blocked)
         resp = next((e for e in trace.children(rid) if e.type == "llm_response"), None)
         tin = ((resp.meta.get("tokens") or {}).get("input") if resp else None) or 0
         total = likely * tin
@@ -183,17 +301,23 @@ def run_why(c: Console, trace: Trace, event: int, *, runs=5, tool=None, match=No
         Path(json_out).write_text(json.dumps(rep.to_dict(), indent=2, ensure_ascii=False))
         c.print(Text(f"report written to {json_out}", style="dim"))
     if any(x.kind == "decisive" for x in rep.causes) and not rep.stopped:
-        c.print(Text(f"Next: runtape fix {trace.path} {event} checks which fixes stop it (these reruns are "
-                     "reused), and --write-test keeps it fixed.", style="dim"))
+        opts = carry(tool=tool, match=match, model_fn=model_fn, fill=fill, full=full, no_guess=not guess)
+        c.print(Text(f"Next: runtape fix {shlex.quote(str(trace.path))} {shlex.quote(str(event_arg or event))}{opts} "
+                     "checks which fixes stop it (these reruns are reused), and --write-test keeps it fixed.",
+                     style="dim"))
     return 0
 
 
 def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replace=None, system=None,
               system_file=None, model_name=None, model_fn=None, cache=True, title=None, fill=None) -> int:
-    from .rerun import rerun
+    from .rerun import build_request, request_for, rerun
 
     if system_file:
         system = Path(system_file).read_text()
+    if not model_fn and not model_name:
+        blocked = need_key(build_request(trace, request_for(trace, event)[0]))
+        if blocked:
+            raise SystemExit(blocked)
     with c.status("rerunning"):
         dist = rerun(trace, event, runs=runs, drop=drop or [], replace=_parse_replace(replace), system=system,
                      model_name=model_name, model=_model(model_fn), cache_dir=".runtape/cache" if cache else None,
@@ -207,13 +331,22 @@ def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replac
 
 
 def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=None, model_fn=None, budget=600,
-            cache=True, yes=False, write_test=None, fill=None, full=False, guess=True) -> int:
+            cache=True, yes=False, write_test=None, fill=None, full=False, guess=True, event_arg=None) -> int:
     from .fix import check_for, fix, test_for, unique_path
+    from .rerun import build_request, request_for
     from .why import make_target
 
+    _check_regex(match)
     if write_test:
         check_for(make_target(trace, event, tool=tool, match=match))  # fail now, before spending model calls
     model = _model(model_fn)
+    note = generic_tool_note(trace, event, tool, match)
+    if note:
+        c.print(Text("! " + note, style="yellow"))
+    if model is None:
+        blocked = need_key(build_request(trace, request_for(trace, event)[0]))
+        if blocked:
+            raise SystemExit(blocked)
     if model is None and not yes and sys.stdin.isatty():
         from .why import estimate_calls
 
@@ -241,7 +374,9 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
             return 1
         c.print(Text(f"Regression test written to {path}. Run it with: pytest {path}", style="bold"))
     elif fr.best is not None:
-        c.print(Text(f"Turn it into a test: runtape fix {trace.path} {event} --write-test "
+        opts = carry(tool=tool, match=match, model_fn=model_fn, fill=fill, full=full, no_guess=not guess)
+        c.print(Text(f"Turn it into a test: runtape fix {shlex.quote(str(trace.path))} "
+                     f"{shlex.quote(str(event_arg or event))}{opts} --write-test "
                      f"tests/test_{_test_stem(fr.report.target)}.py", style="dim"))
     return 0
 
@@ -491,8 +626,13 @@ class Replay(cmd.Cmd):
             self.c.print(render.timeline(self.trace, errs, cursor=self.cur, width=self.row_width))
 
     def _exp_args(self, arg: str, prog: str):
-        p = argparse.ArgumentParser(prog=prog, add_help=False, exit_on_error=False)
+        class _Quiet(argparse.ArgumentParser):
+            def error(self, message):  # report in the session instead of exiting with a usage dump
+                raise ValueError(message)
+
+        p = _Quiet(prog=prog, add_help=False)
         p.add_argument("event", nargs="?")
+        p.add_argument("--model-fn")
         p.add_argument("--runs", type=int, default=5)
         p.add_argument("--tool")
         p.add_argument("--match")
@@ -504,9 +644,11 @@ class Replay(cmd.Cmd):
         p.add_argument("--fill")
         try:
             a = p.parse_args(shlex.split(arg))
-        except (argparse.ArgumentError, SystemExit, ValueError) as e:
+        except (argparse.ArgumentError, ValueError) as e:
             self.c.print(Text(f"{prog}: {e}", style="red"))
             return None
+        if a.model_fn:  # kept for the rest of the session
+            self.model_fn = a.model_fn
         if a.event in ("last", "end", "$"):
             try:
                 a.event = resolve_decision(self.trace, a.event)
@@ -526,16 +668,17 @@ class Replay(cmd.Cmd):
             self.c.print(Text(friendly(e), style="red"))
 
     def do_why(self, arg: str) -> None:
-        """why [N] [--runs K] [--tool NAME] [--match REGEX] [--fill TEXT] [--all]
+        """why [N] [--runs K] [--tool NAME] [--match REGEX] [--fill TEXT] [--all] [--model-fn FILE.py:FN]
         Find which part of the context caused the decision at N (default: current), by removing pieces and
-        re-running that decision. Point at a tool call, a model reply, or a model call."""
+        re-running that decision. Point at a tool call, a model reply, or a model call. --model-fn reruns with
+        your own function instead of the live API, for the rest of the session."""
         a = self._exp_args(arg, "why")
         if a:
             self._safely(lambda: run_why(self.c, self.trace, a.event, runs=a.runs, tool=a.tool, match=a.match,
                                          model_fn=self.model_fn, show_all=a.all, yes=False, fill=a.fill))
 
     def do_rerun(self, arg: str) -> None:
-        """rerun [N] [--runs K] [--drop REF] [--fill TEXT] [--replace OLD=>NEW] [--system-file F] [--model NAME]
+        """rerun [N] [--runs K] [--drop REF] [--fill TEXT] [--replace OLD=>NEW] [--system-file F] [--model NAME] [--model-fn F]
         Re-run the decision at N as recorded or with edits and show what the model does.
         REF is an event number (9), or a part of one (9[1], 9[1].text)."""
         a = self._exp_args(arg, "rerun")
@@ -545,7 +688,7 @@ class Replay(cmd.Cmd):
                                            fill=a.fill))
 
     def do_odds(self, arg: str) -> None:
-        """odds [N] [--runs K]   How often the model makes the same decision on the identical context."""
+        """odds [N] [--runs K] [--model-fn F]   How often the model makes the same decision on the identical context."""
         a = self._exp_args(arg, "odds")
         if a:
             from .rerun import request_for as _rf
@@ -724,9 +867,13 @@ def run_import(c: Console, args) -> int:
                          "capture in the instrumentation.", style="yellow"))
         for note in r.notes:
             c.print(Text("  " + note, style="yellow"))
-    target = done[0].path if len(done) == 1 else "<trace>"
-    reruns = f"reruns go to the {done[0].provider} API" + (f" at {args.base_url}" if args.base_url else "")
-    c.print(Text(f"Next: runtape why {target} last   ({reruns}; --base-url changes that)", style="dim"))
+    target = shlex.quote(str(done[0].path)) if len(done) == 1 else "<trace>"
+    if args.base_url:
+        reruns = f"reruns go to {args.base_url}"
+    else:
+        reruns = (f"reruns go to the {done[0].provider} API; to send them to another OpenAI-compatible server, "
+                  "import again with --base-url")
+    c.print(Text(f"Next: runtape why {target} last   ({reruns})", style="dim"))
     return 0
 
 
@@ -736,15 +883,19 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
     while i < len(argv) and argv[i] in ("--no-color",):
         i += 1  # global options come first
     if i < len(argv) and not argv[i].startswith("-") and argv[i] not in _COMMANDS and (
-        argv[i].endswith(".jsonl") or Path(argv[i]).is_file()
+        argv[i].endswith(".jsonl") or argv[i] == "last" or Path(argv[i]).is_file()
+        or any(argv[i] in t.name for t in find_traces())
     ):
-        argv.insert(i, "replay")  # `runtape trace.jsonl` opens it
+        argv.insert(i, "replay")  # `runtape trace.jsonl`, `runtape last` or `runtape <part of a name>` opens it
     args = build_parser().parse_args(argv)
     c = console or Console(no_color=args.no_color, highlight=False)
+    err = c if console is not None else Console(stderr=True, no_color=args.no_color, highlight=False)
     cmd_name = args.cmd or "replay"
 
     if cmd_name == "mcp":
         try:
+            import mcp  # noqa: F401
+
             from .mcp_server import serve
         except ImportError:
             c.print(Text("The MCP server needs the mcp package: pip install 'runtape[mcp]'", style="red"))
@@ -795,7 +946,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
                            match=args.match, exact_args=args.exact_args, model_fn=args.model_fn,
                            budget=args.budget, cache=not args.no_cache, yes=args.yes, show_all=args.all,
                            json_out=args.json_out, max_pieces=args.max_pieces, dry=args.dry, expand=args.expand,
-                           fill=args.fill, full=args.full, guess=not args.no_guess)
+                           fill=args.fill, full=args.full, guess=not args.no_guess, event_arg=args.event)
         elif cmd_name == "rerun":
             return run_rerun(c, trace, resolve_decision(trace, args.event), runs=args.runs, drop=args.drop,
                              replace=args.replace, system_file=args.system_file, model_name=args.model_name,
@@ -804,7 +955,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_fix(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, model_fn=args.model_fn, budget=args.budget, cache=not args.no_cache,
                            yes=args.yes, write_test=args.write_test, fill=args.fill, full=args.full,
-                           guess=not args.no_guess)
+                           guess=not args.no_guess, event_arg=args.event)
         elif cmd_name == "test":
             add = Path(args.add_system_file).read_text() if args.add_system_file else args.add_system
             return run_test(c, trace, resolve_decision(trace, args.event), out=args.out, tool=args.tool,
@@ -827,14 +978,14 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             except KeyboardInterrupt:
                 c.print()
     except ValueError as e:
-        c.print(Text(str(e), style="red"))
+        err.print(Text(str(e), style="red"))
         return 1
     except Exception as e:
-        c.print(Text(friendly(e), style="red"))
+        err.print(Text(friendly(e), style="red"))
         return 1
     except SystemExit as e:
         if isinstance(e.code, str):
-            c.print(Text(e.code, style="red"))
+            err.print(Text(e.code, style="red"))
             return 1
         raise
     return 0

@@ -35,7 +35,9 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import runtape  # noqa: E402
+import _agent  # noqa: E402
 
 # --------------------------------------------------------- scripted model
 
@@ -274,6 +276,8 @@ def main(trace_path=None, live=False, model=LIVE_MODEL, local=None, local_url="h
     _ids = iter(range(1, 1000))
     name = ("refund-bot-local" if local else "refund-bot-openai" if openai_model else
             "refund-bot-live" if live else "refund-bot")
+    _agent.check_provider("ollama" if local else "openai" if openai_model else "anthropic" if live else "simulated",
+                          local or openai_model or model, local_url)
     rec = runtape.record(trace_path, name=name, tags={"example": True, "live": live, "local": local})
     if local or openai_model:
         import openai
@@ -321,7 +325,7 @@ if __name__ == "__main__":
         print(f"  #{e.id} issue_refund {e.payload['arguments']}")
     if any(e.payload["arguments"].get("amount", 0) > 200 for e in refunds):
         print("The agent refunded over $200 without a manager. Find out why:")
-        fn = "" if a.live or a.local or a.openai else " --model-fn examples/refund_bot.py:simulated_model"
+        fn = "" if a.live or a.local or a.openai else _agent.model_fn_arg(__file__)
         print("  runtape why last tool:issue_refund" + fn)
         print("Then check fixes and write a regression test:")
         print("  runtape fix last tool:issue_refund" + fn + " --write-test tests/test_refund.py")

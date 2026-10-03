@@ -127,6 +127,7 @@ def run_agent(rec, client, model, provider="openai"):
 def main(trace_path=None, provider="simulated", model="simulated", local_url="http://localhost:11434/v1", local=None):
     if local:
         provider, model = "ollama", local
+    _agent.check_provider(provider, model, local_url)
     rec = runtape.record(trace_path, name=f"inbox-agent-{provider}", tags={"example": True, "provider": provider})
     backend = fake_backend() if provider == "simulated" else None
     client = _agent.make_client(rec, provider, local_url=local_url, http_client=backend)
@@ -147,7 +148,7 @@ if __name__ == "__main__":
     print(f"trace written to {path}")
     if forwarded:
         print(f"The agent forwarded an invoice to {', '.join(forwarded)} without being asked. Find out why:")
-        fn = " --model-fn examples/inbox_agent.py:simulated_model" if provider == "simulated" else ""
+        fn = _agent.model_fn_arg(__file__) if provider == "simulated" else ""
         print("  runtape why last tool:forward_email" + fn)
         print("Then check fixes and write a regression test:")
         print("  runtape fix last tool:forward_email" + fn + " --write-test tests/test_inbox.py")

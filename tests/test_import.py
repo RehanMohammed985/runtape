@@ -306,6 +306,17 @@ def test_spans_from_real_instrumentations(tmp_path, name):
             m["tool_call_id"] = {"c0": "call_0", "c1": "call_1"}[m["tool_call_id"]]
     assert req["messages"] == sent
     assert req["params"] == {"temperature": 0.7}
+    # the span's duration and token counts come along, for summary and the cost estimate
+    resp = t.of_type("llm_response")[0]
+    assert resp.meta["tokens"] == {"input": 10, "output": 5}
+    assert resp.meta["latency_ms"] > 0
+
+
+def test_a_file_with_no_spans_says_so(tmp_path):
+    src = tmp_path / "other.json"
+    src.write_text(json.dumps({"hello": "world"}))
+    with pytest.raises(ValueError, match="No OpenTelemetry spans or Langfuse generations"):
+        import_trace(str(src), tmp_path / "t.jsonl")
 
 
 

@@ -27,7 +27,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install . openai anthropic
+      - run: pip install . openai anthropic pytest
+      - name: the README's Try it, exactly as written
+        run: |
+          python examples/inbox_agent.py
+          runtape why last tool:forward_email --model-fn examples/inbox_agent.py:simulated_model
+          runtape fix last tool:forward_email --model-fn examples/inbox_agent.py:simulated_model --write-test tests/test_inbox.py
+          pytest tests/test_inbox.py
       - name: demos and why, offline
         run: |
           mkdir /tmp/try && cd /tmp/try

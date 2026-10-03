@@ -11,6 +11,41 @@ import os
 PROVIDERS = ("openai", "anthropic", "ollama")
 
 
+def check_local(model: str, url: str = "http://localhost:11434/v1") -> None:
+    """Stop with a plain message, before a run starts, if the local server isn't up or doesn't have the model."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/models", timeout=5) as r:
+            have = [m.get("id") for m in json.load(r).get("data") or []]
+    except urllib.error.HTTPError:
+        return  # it's up, it just doesn't list models
+    except (urllib.error.URLError, OSError):
+        raise SystemExit(f"Can't reach a model server at {url}. Start Ollama (ollama serve, or open the app) "
+                         f"and pull the model (ollama pull {model}), or pass --local-url.") from None
+    except ValueError:
+        return
+    if have and model not in have and f"{model}:latest" not in have:
+        raise SystemExit(f"The server at {url} doesn't have {model}. Pull it with: ollama pull {model}"
+                         f"   (it has: {', '.join(sorted(have)[:8])})")
+
+
+def check_provider(provider: str, model: str, local_url: str = "http://localhost:11434/v1") -> None:
+    """Before a run starts (and writes a trace), stop if it can't: no key for the API, or no local server."""
+    if provider == "ollama":
+        check_local(model, local_url)
+    elif provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit("Set OPENAI_API_KEY to use --openai.")
+    elif provider == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+        raise SystemExit("Set ANTHROPIC_API_KEY to use --anthropic.")
+
+
+def model_fn_arg(example_file: str) -> str:
+    """The --model-fn option for an example's stand-in model, as a path that works from the current folder."""
+    return f" --model-fn {os.path.relpath(example_file)}:simulated_model"
+
+
 def make_client(rec, provider: str, *, local_url: str = "http://localhost:11434/v1", http_client=None):
     """A recorded SDK client for the provider."""
     if provider == "anthropic":

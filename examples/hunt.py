@@ -94,7 +94,7 @@ def main(argv=None):
         ap.error("--tries must be at least 1")
     run = SCENARIOS[a.scenario]
     Path("traces").mkdir(exist_ok=True)
-    failures, total_in, total_out, done = [], 0, 0, 0
+    failures, total_in, total_out, done, errors = [], 0, 0, 0, 0
     for i in range(1, a.tries + 1):
         done = i
         try:
@@ -104,6 +104,7 @@ def main(argv=None):
         except SystemExit:
             raise
         except Exception as e:  # an API error on one run shouldn't lose the others
+            errors += 1
             print(f"run {i}: error, {type(e).__name__}: {str(e)[:200]}")
             continue
         tin, tout = tokens(path)
@@ -113,7 +114,11 @@ def main(argv=None):
             failures.append((path, bad, extra))
             if not a.rate:
                 break
-    print(f"\n{len(failures)} of {done} runs failed. Tokens used: {total_in:,} input, {total_out:,} output.")
+    if errors == done:
+        print(f"\nAll {done} runs ended in an error before the agent finished, so there is nothing to explain yet.")
+        return 1
+    errs = f" ({errors} more ended in an error)" if errors else ""
+    print(f"\n{len(failures)} of {done} runs failed{errs}. Tokens used: {total_in:,} input, {total_out:,} output.")
     if not failures:
         print("No failure to explain. Try more --tries, or another model.")
         return 1
