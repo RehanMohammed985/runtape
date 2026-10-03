@@ -30,6 +30,50 @@ Pass `redact=fn` to `runtape.record` to filter events before they are
 written. If `fn` raises, the event content is dropped rather than written
 unredacted.
 
+## Importing traces from other tools
+
+```
+runtape import spans.json [-o traces/run.jsonl] [--trace-id ID] [--provider openai|anthropic]
+                          [--base-url URL] [--tools tools.json]
+runtape import langfuse:<trace id>
+```
+
+Sources:
+
+- OpenTelemetry: an OTLP JSON export (a whole file, or one object per line
+  as the collector's file exporter writes them), or spans as the Python SDK's
+  console exporter prints them. Model calls are read from the GenAI semantic
+  conventions (`gen_ai.input.messages`, `gen_ai.output.messages`,
+  `gen_ai.system_instructions`, `gen_ai.tool.definitions`), the older
+  OpenLLMetry attributes (`gen_ai.prompt.N.*`, `llm.request.functions.N.*`),
+  OpenInference (`input.value`, `llm.input_messages.N.*`, `llm.tools.N.*`),
+  and the older per-message span events. When a framework span wraps the
+  provider's span for the same call, the call is imported once.
+- Langfuse: a trace as `GET /api/public/traces/{id}` returns it, or
+  `langfuse:<trace id>` to fetch it with `LANGFUSE_PUBLIC_KEY`,
+  `LANGFUSE_SECRET_KEY` and `LANGFUSE_HOST`.
+
+An export with several traces is written to one file per trace, unless
+`--trace-id` picks one. Each model call becomes a request and a reply, and
+each tool call the model made becomes a tool call and its result, read from
+the next request's history.
+
+A rerun resends the request, so it needs what was sent:
+
+- Content capture must be on. For the OpenTelemetry instrumentations set
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`; OpenLLMetry
+  captures content unless `TRACELOOP_TRACE_CONTENT=false`.
+- Tool definitions: without them the model can't call a tool, so a decision
+  to call one won't repeat. The import says when they are missing; pass the
+  tools as sent to the model with `--tools tools.json`.
+- Where to send reruns: calls are resent to OpenAI's API, or Anthropic's when
+  the source says the call went to Claude (the messages are converted to
+  Anthropic's format). Spans name the server's host but not its path, so for
+  any other server pass `--base-url`.
+
+Images and audio in OpenAI-format messages are kept as they were. Other non-text content (Anthropic image
+blocks, reasoning blocks) is dropped, so a decision that depends on it won't repeat on rerun.
+
 ## runtape why options
 
 ```

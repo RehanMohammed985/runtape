@@ -592,6 +592,17 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("mcp", help="run an MCP server so coding agents can debug your runs")
     s.add_argument("--model-fn", help="model function for why/rerun instead of the live API")
 
+    s = sub.add_parser("import", help="import a trace from OpenTelemetry or Langfuse, to explain it with why")
+    s.add_argument("source", help="an OpenTelemetry export (OTLP JSON or JSON lines), a Langfuse trace as JSON, "
+                   "or langfuse:TRACE_ID to fetch it (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST)")
+    s.add_argument("-o", "--out", help="where to write the trace (default traces/<source name>.jsonl)")
+    s.add_argument("--trace-id", help="import only this trace from an export that holds several")
+    s.add_argument("--provider", choices=["openai", "anthropic"],
+                   help="the API reruns go to (default: what the source says, else openai)")
+    s.add_argument("--base-url", help="send reruns to this OpenAI-compatible server instead (vLLM, Ollama, a "
+                   "hosted open model)")
+    s.add_argument("--tools", help="a JSON file of tool definitions, when the source didn't record them")
+
     s = sub.add_parser("ls", help="list recorded traces")
     s.add_argument("dir", nargs="?", default=DEFAULT_DIR)
 
@@ -688,7 +699,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 _COMMANDS = {"replay", "ls", "summary", "timeline", "show", "context", "grep", "diff", "why", "rerun", "odds", "mcp",
-             "fix", "test"}
+             "fix", "test", "import"}
+
+
+def run_import(c: Console, args) -> int:
+    from .importers import import_trace
+
+    done = import_trace(args.source, args.out, trace_id=args.trace_id, provider=args.provider,
+                        endpoint=args.base_url, tools_file=args.tools)
+    for r in done:
+        c.print(Text(f"Imported {r.calls} model calls and {r.tool_calls} tool calls into ", style="green")
+                + Text(str(r.path), style="bold"))
+        if r.missing_tools:
+            c.print(Text(f"  {r.missing_tools} of the {r.calls} model calls use tools, but the source has no tool "
+                         "definitions for them. A rerun can't call a tool it isn't given, so a decision to call one "
+                         "won't repeat. Pass --tools tools.json (the tools as sent to the model), or turn on tool "
+                         "capture in the instrumentation.", style="yellow"))
+        for note in r.notes:
+            c.print(Text("  " + note, style="yellow"))
+    target = done[0].path if len(done) == 1 else "<trace>"
+    reruns = f"reruns go to the {done[0].provider} API" + (f" at {args.base_url}" if args.base_url else "")
+    c.print(Text(f"Next: runtape why {target} last   ({reruns}; --base-url changes that)", style="dim"))
+    return 0
 
 
 def main(argv: list[str] | None = None, console: Console | None = None) -> int:
@@ -714,6 +746,8 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
         return 0
 
     try:
+        if cmd_name == "import":
+            return run_import(c, args)
         if cmd_name == "ls":
             traces = find_traces(args.dir)
             if not traces:

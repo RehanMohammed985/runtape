@@ -27,8 +27,9 @@ that holds.
 
 Tracing tools such as LangSmith and Langfuse show what the agent saw.
 Attribution methods such as ContextCite score context for a single model
-response. runtape works on your agent's own recorded runs, on your machine,
-and is meant for investigating a specific failure and keeping it fixed.
+response. runtape works on your agent's own runs, recorded by runtape or
+imported from OpenTelemetry or Langfuse, on your machine, and is meant for
+investigating a specific failure and keeping it fixed.
 
 ## Install
 
@@ -91,6 +92,24 @@ def lookup_order(order_id: str):
 Traces go to `./traces/`, one JSONL file per run. See
 [docs/usage.md](https://github.com/RehanMohammed985/runtape/blob/main/docs/usage.md)
 for Anthropic, LangChain, streaming and custom loops.
+
+### Already tracing with OpenTelemetry or Langfuse?
+
+Import a trace you already have instead of recording again:
+
+```
+runtape import spans.json              # an OpenTelemetry export
+runtape import langfuse:<trace id>     # fetched from Langfuse with your API keys
+runtape why traces/spans.jsonl last
+```
+
+It reads spans from OpenLLMetry, OpenInference (Arize Phoenix) and the
+OpenTelemetry GenAI conventions, and Langfuse generations. On spans from
+OpenLLMetry 0.62 and OpenInference 0.1.63, the rebuilt requests are identical
+to what the agent sent. Reruns need the prompts, replies and tool
+definitions, so content capture has to be on; `--tools` supplies definitions
+the source didn't keep, and `--base-url` sends reruns to an OpenAI-compatible
+server.
 
 ## Find what a decision depends on
 
