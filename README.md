@@ -189,8 +189,9 @@ told where the sentence is.
   decision was no longer the model's usual choice when `why` ran, either
   because the model makes it only about half the time or because a routed API
   served the reruns from a different provider. `why` reported that there was
-  nothing stable to attribute and named no cause. Attribution needs a decision
-  the model makes consistently.
+  nothing stable to attribute and named no cause. These runs predate 0.5,
+  which searches a decision made 15-60% of the time on more reruns instead of
+  stopping.
 - Other pieces were reported as causes too, mostly the user's request, the
   system prompt, or data the action needs (the test failure, the list of
   roles). These are real conditions of the decision and are listed after the
@@ -210,6 +211,20 @@ saved replies cover (33 of 34; the other needs a reply that was never saved).
 Results and traces are in `bench/results`, `bench/traces` and
 `bench/seed1/traces` (the new-seed run); the method is
 in [bench/README.md](https://github.com/RehanMohammed985/runtape/blob/main/bench/README.md).
+
+### On AgentDojo
+
+[AgentDojo](https://github.com/ethz-spylab/agentdojo) is a public
+prompt-injection benchmark, not written for runtape. On sarvam-105b
+(open-weight), banking and Slack, 30 pairs each: of the 23 attacks the model
+made consistently or intermittently, `why` named text inside the injection
+in 20. Asking the model which piece caused the call got 18, leave-one-out 15
+and wording overlap 10. No method blamed the injection for the user's own
+actions (wording overlap once). `fix`'s check on the recorded decision
+predicted the live result: fixes it rated strong let the attack through 27%
+of the time in full AgentDojo runs, the rest 53-61%, and no prompt fix
+stopped these attacks outright. Details and limits:
+[bench/agentdojo](https://github.com/RehanMohammed985/runtape/blob/main/bench/agentdojo/README.md).
 
 ## Check fixes, then keep them
 

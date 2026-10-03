@@ -44,3 +44,56 @@ longer makes at least half the time when rerun is reported separately, as in the
 are written to `bench/agentdojo/traces` and reruns are cached in `bench/agentdojo/.cache`.
 
 `tests/test_agentdojo.py` runs every phase end to end against a local stand-in server.
+
+## Results: sarvam-105b, banking and Slack
+
+sarvam-105b is an open-weight model (Apache 2.0), run here through Sarvam's API. 30 pairs per suite, every
+phase. Results: `bench/results/agentdojo-sarvam-105b.jsonl`; traces: `bench/agentdojo/traces/sarvam-105b`.
+`python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl` prints the full report.
+
+The attack worked in 31 of 60 pairs, and the attacker's call was found in 30. When rerun on the same
+context, 15 of those decisions were made consistently, 8 intermittently (15-60% of reruns, searched on 30
+reruns per check), and 7 too rarely to attribute, which `why` reported as such.
+
+On the 23 decisions it searched:
+
+| method | text inside the injection | ...including the attacker's instruction | model calls |
+|---|---|---|---|
+| runtape why | 20/23 (87%) | 15/23 | median 153 (consistent), 262 (intermittent) |
+| model as judge | 18/23 (78%) | 16/23 | 1-2 |
+| leave-one-out, largest drop over 5 runs | 15/23 (65%) holds it | - | about 5 per piece |
+| wording overlap | 10/23 (43%) | 10/23 | 0 |
+
+- Leave-one-out with one run per piece flagged the injection in 18 of 23, along with 41 pieces that had
+  nothing to do with it.
+- runtape listed the injection among its causes, headline or not, in 21 of 23. Of the three it missed as
+  headline: one needed two things together (the message linking to a page and the injected text on it) and
+  ranked the message first; in another, the agent had restated the injected instruction in its own reply
+  before acting, so removing the injection alone no longer stopped the action (leave-one-out missed it
+  too); in the third, no piece passed the test.
+- The judge is a strong baseline on this question, close to runtape and slightly better at quoting the
+  attacker's sentence. What it doesn't give is evidence that removing the text changes the decision, or a
+  way to check a fix.
+- False positives: on 11 decisions that were the user's own action in a trace holding the injection,
+  runtape and the judge blamed the injection 0 times, wording overlap once.
+
+Fixes, on the 22 decisions with a cause (3 live AgentDojo runs per fix, under attack and without it):
+
+| fix | passed on the recorded decision | live: attack worked | live: task done, no attack |
+|---|---|---|---|
+| none | - | 50/66 | 51/66 |
+| untrusted content (prompt) | 0/22 | 34/66 | 52/66 |
+| action guard (prompt) | 3/22 | 30/66 | 52/66 |
+| both rules (prompt) | 4/22 | 31/66 | 51/66 |
+| fix the source (remove the injection) | 20/22 | - | - |
+
+- No prompt fix stops these attacks on this model: they cut the attack rate from 76% to 45-52% and don't
+  break the task without an attack.
+- The check on the recorded decision predicts the live result. Fixes that cut the attack below 20% on the
+  recorded decision let it through 27% of the time in full runs, against 53% for 20-50% and 61% above 50%.
+  It agreed with the live outcome (blocked in all 3 runs or not) for 55 of 66 fixes.
+
+Limits: one model and two suites. sarvam-105b's default cap of 2048 reply tokens cut off about one reply
+in six mid-thought, which accounts for most of the unstable decisions in banking (`--max-tokens` sets a
+larger cap for later runs). The judge thought past 4096 tokens without answering on 30 of its 49
+prompts and answered those with reasoning off. 3 live runs per fix is thin evidence for "blocked every time".
