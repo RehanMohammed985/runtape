@@ -51,6 +51,10 @@ sarvam-105b is an open-weight model (Apache 2.0), run here through Sarvam's API.
 phase. Results: `bench/results/agentdojo-sarvam-105b.jsonl`; traces: `bench/agentdojo/traces/sarvam-105b`.
 `python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl` prints the full report.
 
+These results are from runtape 0.5.0, which tested at a 5% significance level and searched every piece.
+0.6.0 tests at 1% and starts from the model's own guess at the cause; to rerun the search with it on the
+same agent runs (the fixes are kept where the cause comes out the same), use `--redo why` with every phase.
+
 The attack worked in 31 of 60 pairs, and the attacker's call was found in 30. When rerun on the same
 context, 15 of those decisions were made consistently, 8 intermittently (15-60% of reruns, searched on 30
 reruns per check), and 7 too rarely to attribute, which `why` reported as such.
