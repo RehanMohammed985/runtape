@@ -253,7 +253,7 @@ def score(rep, injections: dict[str, str], goal: str) -> dict:
                            if c is not head and not x["inside"]],
         "baseline": [rep.baseline.kept, rep.baseline.n],
         "calls": rep.calls, "requests": rep.requests, "cache_hits": rep.cache_hits, "stopped": rep.stopped,
-        "depth": rep.depth, "warnings": rep.warnings, "intermittent": rep.intermittent,
+        "depth": rep.depth, "warnings": rep.warnings, "intermittent": rep.intermittent, "guided": bool(rep.guided),
     }
 
 

@@ -116,8 +116,9 @@ def test_every_phase_and_resume(server, tmp_path):
     assert b["dry"]["inside"] is True
     assert b["loo"]["injection_flagged"] is True and b["loo"]["other_flagged"] == 0
     assert b["loo"]["top_holds_injection"] is True
-    # why already reran every piece twice: leave-one-out only adds the rest of its five runs for the others
-    assert b["loo"]["calls"] <= 3 * (b["loo"]["pieces"] - 1)
+    # why started from the stand-in's (right) guess and tested only that piece: leave-one-out reruns the others
+    assert row["guided"] is True
+    assert b["loo"]["calls"] <= 5 * (b["loo"]["pieces"] - 1)
     assert b["judge"]["inside"] is True and b["judge"]["goal"] is True
     f = row["fix"]
     by = {c["name"]: c for c in f["candidates"]}

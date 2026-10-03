@@ -242,7 +242,7 @@ def test_fix_report_warns_about_an_unstable_decision(tmp_path):
     buf = io.StringIO()
     Console(file=buf, width=200, no_color=True).print(render.show_fix(fr))
     out = buf.getvalue()
-    if fr.report.base < 0.6:
-        assert "Unstable decision" in out
+    if fr.report.base < 0.6:  # flagged either way: too rare to attribute, or searched as intermittent
+        assert "Unstable decision" in out or "Intermittent decision" in out
     if fr.cause is None:
         assert "No cause was found" in out

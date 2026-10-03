@@ -227,6 +227,34 @@ def text_judge(a: Reply, b: Reply) -> bool:
 # ------------------------------------------------------------------ statistics
 
 
+GUESS_PROMPT = """An AI agent decided to {decision}.
+
+Below is everything the agent saw before deciding, split into numbered pieces. Which piece caused the \
+agent to make this decision? Answer with the piece number alone on the first line. On the second line, \
+quote the exact sentence from that piece that caused it.
+
+{pieces}"""
+GUESS_MAX_TOKENS = 4096  # a reasoning model spends output tokens thinking; servers often default to 2048
+
+
+def _holds(text: str, quote: str) -> bool:
+    """Does this part hold the quoted sentence (or is it a piece of it)?"""
+    norm = lambda x: " ".join(x.split()).lower()  # noqa: E731
+    t, q = norm(text), norm(quote)
+    return bool(q) and len(q) > 10 and (q in t or (len(t) > 20 and t in q))
+
+
+def _part_holding(seg: Segment, quote: str) -> Segment | None:
+    """The smallest part of a piece that holds the quoted sentence, if any part below the piece does."""
+    best = None
+    cur = seg
+    while True:
+        nxt = next((k for k in cur.children() if _holds(k.text, quote)), None)
+        if nxt is None:
+            return best
+        best = cur = nxt
+
+
 def fisher_less(kept_removed: int, n_removed: int, kept_base: int, n_base: int) -> float:
     """One-sided Fisher exact test: the chance of seeing this few repeats with the piece removed
     if removing it made no difference."""
@@ -307,7 +335,7 @@ class Report:
     depth: str = "full"  # "quick" when the search stopped at the main cause (no search for hidden causes or combinations)
     untested: list = field(default_factory=list)  # least suspicious pieces skipped by --max-pieces
     threshold: float = 0.5
-    alpha: float = 0.05
+    alpha: float = 0.01
     deterministic: bool = False
     confirmed: list = field(default_factory=list)  # every trial that passed the significance test
     unexpanded: int = 0  # pieces with parts that were not looked inside for masked causes
@@ -315,6 +343,9 @@ class Report:
     # the model makes the decision only some of the time: causes are pieces without which it happens at
     # most half as often, confirmed on more reruns (threshold is then that share of the rate)
     intermittent: bool = False
+    # the search started from the model's own guess at the cause, and stopped there once it was proven:
+    # {"piece": where, "quote": the sentence it named}
+    guided: dict | None = None
 
     @property
     def base(self) -> float:
@@ -345,6 +376,7 @@ class Report:
             "decision": {"request": self.target.request_id, "response": self.target.response_id,
                          "outcome": self.target.describe()},
             "baseline": {"happens": self.baseline.kept, "runs": self.baseline.n, "intermittent": self.intermittent},
+            "guided": self.guided,
             "causes": [{"kind": c.kind, "masked": c.masked, "chain": [trial(t) for t in c.chain],
                         "together": trial(c.refined) if c.refined else None,
                         "recheck": {"fill": c.recheck.fill, "still_happens": c.recheck.kept, "runs": c.recheck.n,
@@ -384,7 +416,7 @@ class Why:
         k: int = 5,
         screen: int = 2,
         confirm: int = 10,
-        alpha: float = 0.05,
+        alpha: float = 0.01,
         threshold: float = 0.5,
         max_depth: int = 4,
         max_causes: int = 8,
@@ -399,6 +431,7 @@ class Why:
         depth: str = "quick",
         intermittent_confirm: int = 30,
         intermittent_min: float = 0.15,
+        guess: bool = True,
     ):
         if k < 1:
             raise ValueError("runs must be at least 1")
@@ -430,7 +463,13 @@ class Why:
         self.intermittent_confirm = max(intermittent_confirm, confirm)
         self.intermittent_min = intermittent_min
         self.intermittent_below = 0.6  # where a decision counts as unstable
+        self.unsteady_below = 0.8  # under this on the first reruns, measure the rate on more before deciding
         self.intermittent = False
+        # Quick searches first ask the model which piece of its context made it decide, and test that piece
+        # first with half the significance level. A proven guess, narrowed as far as it goes, ends the search;
+        # anything else falls back to testing every piece, with the other half.
+        self.guess = guess
+        self._share = 1.0
         self.max_depth = max_depth
         self.max_causes = max_causes
         self.expand = expand
@@ -522,7 +561,7 @@ class Why:
         if self.det:
             self._extend(t, self.confirm)
             return t.kept == 0 and self.base_trial.kept == self.base_trial.n
-        level = self.alpha / t.family
+        level = self.alpha * self._share / t.family
         early = self.early_share * level
         if t.n < self.confirm and early > 0:
             # a clear effect is already significant on the reruns screening made: stop here
@@ -643,10 +682,12 @@ class Why:
                 "compare that with: runtape rerun <trace> <event> --drop <event> --runs 20."
             )
             return
-        if self.base < self.intermittent_below and not self.det:
-            # Measure the rate once more first: a few unlucky reruns shouldn't change how the search runs.
+        if self.base < self.unsteady_below and not self.det:
+            # Not clearly steady: measure the rate on more reruns before choosing how to search. A decision
+            # made half the time can look like 60-70% on ten reruns and be searched as a steady one, where no
+            # single piece can lower it enough and only an imprecise combination gets reported.
             self._extend(self.base_trial, self.confirm)
-            if self.base < self.intermittent_below:
+            if self.base < self.unsteady_below:
                 # A decision the model makes only some of the time (an attack that works one run in three is
                 # still an attack): intermittent. A cause can't lower its rate by the usual margin, but it can make it stop
                 # happening: measure the rate on more reruns, and count a piece as a cause when removing it
@@ -666,6 +707,9 @@ class Why:
                 self.intermittent = rep.intermittent = True
                 self.threshold = rep.threshold = self.threshold * self.base
                 self.confirm = self.intermittent_confirm
+                # Halving a rate is a weaker bar than a drop of half the runs, so noise passes it more often.
+                # A stricter significance level (half) keeps false causes as rare as for a steady decision.
+                self.alpha = rep.alpha = self.alpha / 2
                 rep.warnings.append(
                     f"Intermittent decision: the model makes it in {self.base_trial.kept}/{self.base_trial.n} reruns "
                     "of the same context. The causes below are what it depends on: without each, it happens at most "
@@ -687,6 +731,11 @@ class Why:
             keep = [s for s in segs if s not in pinned][: max(0, self.max_pieces - len(pinned))]
             rep.untested = [s for s in segs if s not in keep and s not in pinned]
             segs = pinned + keep
+
+        if self.depth == "quick" and self.guess and self._guided(rep, all_segs):
+            rep.depth = "quick"
+            self._finish(rep)
+            return
 
         self.progress(f"testing {len(segs)} pieces of context")
         try:
@@ -779,6 +828,58 @@ class Why:
 
         self._finish(rep)
 
+    def _guess_cause(self, segs: list[Segment]) -> tuple[Segment, str] | None:
+        """The model's own guess: which numbered piece made it decide, and which sentence. One call (two if a
+        reasoning model thinks past the cap without answering). None if it can't say."""
+        pieces = "\n\n".join(f"[{i}] ({s.where})\n{s.text}" for i, s in enumerate(segs, 1))
+        prompt = GUESS_PROMPT.format(decision=self.target.question(), pieces=pieces)
+        jreq = {k: v for k, v in self.req.items() if k in ("api", "provider", "model", "endpoint")}
+        jreq.update(messages=[{"role": "user", "content": prompt}], params={"max_tokens": GUESS_MAX_TOKENS})
+        try:
+            reply = self.sampler.one(jreq, 0)
+            if not (reply.text or "").strip() and reply.stop_reason == "length":
+                reply = self.sampler.one({**jreq, "params": {**jreq["params"], "reasoning_effort": None}}, 0)
+        except Exception:  # noqa: BLE001 - no guess (a server that won't answer it, or the budget): search everything
+            return None
+        text = (reply.text or "").strip()
+        m = re.match(r"\D{0,20}?(\d+)", text)
+        if not m or not 1 <= int(m.group(1)) <= len(segs):
+            return None
+        lines = [ln.strip().strip("\"'“”") for ln in text.splitlines() if ln.strip()]
+        return segs[int(m.group(1)) - 1], (lines[1] if len(lines) > 1 else "")
+
+    def _guided(self, rep: Report, segs: list[Segment]) -> bool:
+        """Test the model's guess first. True when it is proven and narrowed to one part the agent read,
+        without which the agent acts differently: then that is the answer, and nothing else is tested."""
+        self.progress("asking the model where to look first")
+        guess = self._guess_cause(segs)
+        if guess is None:
+            return False
+        seg, quote = guess
+        self._share = 0.5  # the guess gets half the significance level; the full search, if needed, the rest
+        self.progress(f"testing its guess first: {seg.where}")
+        t = self._trials([[seg]])[0]
+        if self._candidate(t) and self._confirm(t, 2):
+            c = Cause([t])
+            self.progress(f"narrowing down {seg.where}")
+            c.chain = self._drill(t, [], prefer=quote)
+        else:
+            # The piece as a whole may hold the cause next to evidence against it (a stale doc beside the real
+            # policy), so removing all of it changes nothing. Test the part holding the quoted sentence.
+            part = _part_holding(seg, quote)
+            if part is None:
+                return False
+            self.progress(f"testing the part it quoted: {part.where}")
+            tp = self._trials([[part]])[0]
+            if not (self._candidate(tp) and self._confirm(tp, 2)):
+                return False
+            c = Cause([t] + self._drill(tp, [], prefer=quote), masked=True)
+        if not self._settled(c):
+            return False
+        rep.trials, rep.confirmed, rep.causes = [t], [x for x in c.chain if x.p is not None], [c]
+        rep.guided = {"piece": seg.where, "quote": quote}
+        return True
+
     def _warn_unstable(self, rep: Report) -> None:
         if self.intermittent:
             return  # said already, with what the causes mean
@@ -851,12 +952,16 @@ class Why:
         r.family = 1
         c.recheck = r
 
-    def _drill(self, top: Trial, held: list[Segment], screen: int | None = None) -> list[Trial]:
-        """Follow a cause down into smaller and smaller pieces while they still flip the decision."""
+    def _drill(self, top: Trial, held: list[Segment], screen: int | None = None,
+               prefer: str | None = None) -> list[Trial]:
+        """Follow a cause down into smaller and smaller pieces while they still flip the decision. `prefer`
+        (a sentence the model named) puts the parts holding it first."""
         chain = [top]
         cur = top
         while len(chain) <= self.max_depth:
             kids = self._rank(cur.removed[-1].children())
+            if prefer:
+                kids.sort(key=lambda k: not _holds(k.text, prefer))  # stable: rank order otherwise
             if not kids:
                 break
             # Most suspicious parts first, a few at a time; stop at the first one confirmed. The search only
@@ -979,13 +1084,14 @@ def why(
     cache_dir: str | None = ".runtape/cache",
     workers: int = 8,
     threshold: float = 0.5,
-    alpha: float = 0.05,
+    alpha: float = 0.01,
     max_pieces: int | None = 80,
     expand: int = 6,
     fill: str | None = None,
     progress: Callable[[str], None] | None = None,
     on_call: Callable[[], None] | None = None,
     depth: str = "quick",
+    guess: bool = True,
 ) -> Report:
     """Explain a decision in a trace. See module docstring."""
     from .rerun import FunctionModel
@@ -1010,7 +1116,7 @@ def why(
         else:
             target.judge = llm_judge(sampler, req)
     rep = Why(trace, target, sampler, k=runs, screen=screen, confirm=confirm, threshold=threshold, alpha=alpha,
-              max_pieces=max_pieces, expand=expand, fill=fill, progress=progress, depth=depth).run()
+              max_pieces=max_pieces, expand=expand, fill=fill, progress=progress, depth=depth, guess=guess).run()
     rep.warnings[:0] = notes
     return rep
 

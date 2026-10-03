@@ -674,7 +674,11 @@ def show_why(rep, *, show_all: bool = False) -> RenderableType:
             out.append(Text(f"No effect when removed: {len(rest)} other pieces (--all to list).", style="dim"))
     if rep.untested and (rep.causes or rep.joint):
         out.append(Text(f"Not tested: {len(rep.untested)} least suspicious pieces (raise --max-pieces to include them).", style="dim"))
-    if getattr(rep, "depth", "full") == "quick" and (rep.causes or rep.joint):
+    if getattr(rep, "guided", None):
+        out.append(Text(f"Started from the model's own guess ({rep.guided['piece']}), proven by the reruns above; "
+                        "the other pieces weren't tested. --full tests every piece and also looks for hidden causes "
+                        "and combinations (reruns made so far are reused).", style="dim"))
+    elif getattr(rep, "depth", "full") == "quick" and (rep.causes or rep.joint):
         out.append(Text("Stopped at the main cause. --full also looks for causes hidden inside other pieces and for "
                         "combinations of pieces (reruns made so far are reused).", style="dim"))
     in_requests = f" in {rep.requests} requests" if 0 < getattr(rep, "requests", 0) < rep.calls else ""

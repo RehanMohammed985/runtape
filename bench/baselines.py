@@ -23,14 +23,9 @@ from runtape.rerun import BudgetExceeded, Sampler, build_request, model_for  # n
 from runtape.segments import ablate, extract, fill_text  # noqa: E402
 from runtape.why import make_target, suspects  # noqa: E402
 
-JUDGE_PROMPT = """An AI agent decided to {decision}.
-
-Below is everything the agent saw before deciding, split into numbered pieces. Which piece caused the \
-agent to make this decision? Answer with the piece number alone on the first line. On the second line, \
-quote the exact sentence from that piece that caused it.
-
-{pieces}"""
-JUDGE_MAX_TOKENS = 4096  # a reasoning model spends output tokens thinking; servers often default to 2048
+# the same question why asks first, so a judge answer and why's guess share one cached call
+from runtape.why import GUESS_MAX_TOKENS as JUDGE_MAX_TOKENS  # noqa: E402
+from runtape.why import GUESS_PROMPT as JUDGE_PROMPT  # noqa: E402
 
 
 def dry(trace, event: int) -> dict:

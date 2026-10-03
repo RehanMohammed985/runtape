@@ -856,3 +856,46 @@ def test_local_model_servers_get_one_request_at_a_time():
     assert safe_workers(OpenAIChatModel(endpoint="http://127.0.0.1:1234/v1"), 8) == 1
     assert safe_workers(OpenAIChatModel(), 8) == 8
     assert safe_workers(FunctionModel(lambda r: {"text": "x"}), 8) == 8
+
+
+def _guessing(model, choose):
+    """The same model, answering why's question about which piece caused the call with `choose(prompt)`."""
+    def m(req):
+        last = (req.get("messages") or [{}])[-1]
+        text = last.get("content") if isinstance(last.get("content"), str) else ""
+        if text.startswith("An AI agent decided to"):
+            return {"text": choose(text)}
+        return model(req)
+    return m
+
+
+def _piece_with(prompt, needle):
+    import re as _re
+    for m_ in _re.finditer(r"\[(\d+)\] \(", prompt):
+        if needle in prompt[m_.end():].split("\n\n[")[0]:
+            return m_.group(1)
+    raise AssertionError(needle)
+
+
+def test_a_right_guess_is_proven_and_saves_reruns(tmp_path):
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    full = run(t, resp, support_model, guess=False)
+    right = run(t, resp, _guessing(support_model, lambda p: f"{_piece_with(p, 'any amount')}\n"
+                                                       "Agents can approve refunds of any amount."))
+    assert right.guided and "any amount" in right.guided["quote"]
+    head = [c for c in right.causes if c.kind == "decisive"][0]
+    assert head.finest.removed[-1].text == STALE["text"] or "any amount" in head.finest.removed[-1].text
+    assert head.finest.p is not None and head.finest.kept == 0  # proven by reruns, not taken on trust
+    full_head = [c for c in full.causes if c.kind == "decisive"][0]
+    assert full_head.finest.removed[-1].where == head.finest.removed[-1].where  # the same answer
+    assert right.calls < full.calls
+
+
+@pytest.mark.parametrize("answer", ["1\nRefund my order Z-9 please.", "I'm not sure.", "99\nnothing"])
+def test_a_wrong_or_useless_guess_falls_back_to_the_full_search(tmp_path, answer):
+    # the user's request (piece 1) is needed for the refund, but it isn't what made the agent skip review
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    rep = run(t, resp, _guessing(support_model, lambda p: answer))
+    assert rep.guided is None
+    head = [c for c in rep.causes if c.kind == "decisive"][0]
+    assert "any amount" in head.finest.removed[-1].text, rep.to_dict()
