@@ -10,6 +10,9 @@ with how often it made it before, with the same significance test `why` uses. Th
 - both rules together
 - fixing the source: the cause removed from the context, which is what correcting or filtering the
   content where it comes from would achieve
+- the model's own suggestions: given the proven cause, the agent's model proposes rules for its system
+  prompt aimed at this failure, and each is checked like the others. A suggestion is a guess until the
+  reruns say it works; asking the model for a fix gives you only the first one, unchecked
 
 A fix passes when the bad call never happens in its reruns and the drop is significant. `write_test`
 turns a passing fix into a pytest file that reruns the recorded decision against the live model.
@@ -62,6 +65,7 @@ class Candidate:
     p: float | None = None
     instead: Counter = field(default_factory=Counter)
     complete: bool = False  # all reruns done (False when the budget ran out first)
+    suggested: bool = False  # proposed by the model, rather than one of the standard fixes
 
     @property
     def rate(self) -> float:
@@ -129,6 +133,62 @@ def propose(report: Report) -> tuple[Cause | None, list[Candidate]]:
     return cause, out
 
 
+SUGGEST_PROMPT = """An AI agent made a decision it should not have: it would {decision}.
+
+Reruns showed what caused it: with this text in its context the agent does it, and without it, it \
+doesn't. The text came from {where}:
+
+{cause}
+
+The agent's system prompt is:
+
+{system}
+
+Propose {n} different rules to add to the agent's system prompt that would stop it from making this \
+decision because of text like this, without stopping it from doing its normal work. Make each rule one or \
+two sentences, specific to this situation. Reply with only a JSON list of {n} strings, the one most likely \
+to work first."""
+SUGGEST_MAX_TOKENS = 4096  # room for a reasoning model to think before it answers
+
+
+def suggest_rules(report: Report, cause: Cause, sampler: Sampler, n: int = 3) -> list[str]:
+    """Rules the agent's model proposes for its own system prompt, to stop the decision this cause led to,
+    most promising first. One call (two if a reasoning model thinks past the cap without answering); [] if
+    the model doesn't give a usable answer."""
+    import json
+
+    from .rerun import current_system
+
+    removed = list((cause.refined or cause.finest).removed)
+    text = " ".join(" ".join(s.text.split()) for s in removed)
+    req = build_request(report.trace, report.target.request_id)
+    prompt = SUGGEST_PROMPT.format(decision=report.target.question(), where=", ".join(s.where for s in removed),
+                                   cause=text[:2000], system=current_system(req)[:4000] or "(none)", n=n)
+    ask = {k: v for k, v in req.items() if k in ("api", "provider", "model", "endpoint")}
+    ask.update(messages=[{"role": "user", "content": prompt}], params={"max_tokens": SUGGEST_MAX_TOKENS})
+    try:
+        reply = sampler.one(ask, 0)
+        if not (reply.text or "").strip() and reply.stop_reason == "length":
+            reply = sampler.one({**ask, "params": {**ask["params"], "reasoning_effort": None}}, 0)
+    except Exception:  # noqa: BLE001 - no suggestions (a server that won't answer, or the budget)
+        return []
+    out = (reply.text or "").strip()
+    found = re.search(r"\[.*\]", out, re.S)
+    try:
+        rules = json.loads(found.group()) if found else []
+    except ValueError:
+        rules = []
+    if not isinstance(rules, list):
+        rules = []
+    seen, keep = set(), []
+    for r in rules:
+        r = " ".join(str(r).split()) if isinstance(r, (str, int, float)) else ""
+        if 15 <= len(r) <= 1000 and r.lower() not in seen:
+            seen.add(r.lower())
+            keep.append(r)
+    return keep[:n]
+
+
 def verify(trace: Trace, report: Report, candidates: list[Candidate], sampler: Sampler, runs: int = 10,
            fill: str | None = None) -> None:
     """Rerun the decision with each fix. If the budget runs out, what was measured is kept and the
@@ -173,10 +233,12 @@ def fix(
     workers: int = 8,
     progress: Callable[[str], None] | None = None,
     on_call: Callable[[], None] | None = None,
+    suggest: bool = True,
     **why_kwargs,
 ) -> FixReport:
-    """Find the cause of a decision (or take a `why` report), then check candidate fixes against it.
-    `budget` caps the model calls of both steps together."""
+    """Find the cause of a decision (or take a `why` report), then check candidate fixes against it: the
+    standard ones and, with `suggest`, up to three the model proposes for this cause. `budget` caps the model
+    calls of both steps together."""
     from .rerun import AnthropicModel, FunctionModel, OpenAIChatModel, OpenAIResponsesModel, request_for
 
     if not isinstance(trace, Trace):
@@ -196,6 +258,11 @@ def fix(
         return out
     left = None if budget is None else max(0, budget - report.calls)
     sampler = Sampler(model, cache_dir=cache_dir, budget=left, workers=safe_workers(model, workers), on_call=on_call)
+    if suggest and cause is not None:
+        progress("asking the model for fixes aimed at this cause")
+        for i, rule in enumerate(suggest_rules(report, cause, sampler), 1):
+            candidates.append(Candidate(f"suggested {i}", f"add the model's suggestion {i} to the system prompt",
+                                        add_system=rule, suggested=True))
     if report.intermittent:
         # an intermittent decision was measured on more reruns; a fix needs as many to show it stops it
         runs = max(runs, report.baseline.n)

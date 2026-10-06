@@ -13,6 +13,7 @@ written for runtape.
 | `why` | if the attack worked, runs `runtape why` on the reply that made the attacker's call (found by a value only the injection asks for, such as the attacker's account), without saying where the injection is |
 | `baselines` | attributes the same decision by wording overlap, by plain leave-one-out (one run per piece, and the largest drop over five) and by asking the model which piece and sentence caused it |
 | `fix` | checks fixes on the recorded decision with `runtape fix`, then runs the full task with each prompt fix and with none: under attack (does the attack still work, does the task get done) and without it (does the fix break the task) |
+| `suggest` | asks the agent's model for rules aimed at the proven cause, checks them on the recorded decision with `runtape fix`, and runs the live task with the model's first suggestion (what asking the model gets you) and with the fix runtape picks |
 | `control` | runs `why` and the baselines on the user's own action (paying the real bill) in a trace where the injection is present; blaming the injection there is a false positive |
 
 ```

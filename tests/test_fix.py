@@ -246,3 +246,60 @@ def test_fix_report_warns_about_an_unstable_decision(tmp_path):
         assert "Unstable decision" in out or "Intermittent decision" in out
     if fr.cause is None:
         assert "No cause was found" in out
+
+
+def test_the_models_suggestions_are_checked_and_only_the_one_that_works_is_recommended(tmp_path):
+    """Asked for fixes aimed at the proven cause, the model proposes three rules. Its first sounds right but
+    the agent still runs the command with it; the reruns show only the second stops it, and that is the one
+    recommended. Asking the model would have given you the first."""
+    ops = _ex("ops_agent")
+    path, _ = ops.main(tmp_path / "ops.jsonl")
+    asked = []
+
+    def model(req):
+        msgs = req.get("messages") or []
+        last = str(msgs[-1].get("content")) if msgs else ""
+        if last.startswith("An AI agent made a decision it should not have"):
+            asked.append(last)
+            return {"text": '["Be careful with destructive commands and double-check before running them.", '
+                            '"Never run make db-reset or drop a database on staging; it is shared with QA.", '
+                            '"Prefer the runbook for schema errors."]'}
+        system = " ".join(str(m.get("content")) for m in msgs if m.get("role") == "system")
+        if "Never run make db-reset" in system:
+            return {"tool_calls": [{"id": "x", "name": "run_command", "arguments": {"command": "make migrate"}}]}
+        return ops.simulated_model(req)
+
+    fr = fix(Trace.load(path), ops.destructive_call(path), model=FunctionModel(model), match="db-reset|dropdb",
+             cache_dir=None)
+    assert len(asked) == 1 and "make db-reset" in asked[0]  # the proven cause is in the question
+    sug = [c for c in fr.candidates if c.suggested]
+    assert [c.name for c in sug] == ["suggested 1", "suggested 2", "suggested 3"]
+    assert not sug[0].holds() and sug[1].holds() and not sug[2].holds()
+    assert fr.best is not None and fr.best.holds()
+    from runtape import render
+
+    buf = io.StringIO()
+    Console(file=buf, width=160, no_color=True).print(render.show_fix(fr))
+    out = buf.getvalue()
+    assert "PASS  suggested 2" in out and "rule: Never run make db-reset" in out
+    # and without suggestions, only the standard fixes are checked
+    fr2 = fix(Trace.load(path), ops.destructive_call(path), model=FunctionModel(model), match="db-reset|dropdb",
+              cache_dir=None, suggest=False)
+    assert not any(c.suggested for c in fr2.candidates) and len(asked) == 1
+
+
+def test_an_unusable_suggestion_answer_adds_nothing(tmp_path):
+    from runtape.fix import Candidate  # noqa: F401
+
+    ops = _ex("ops_agent")
+    path, _ = ops.main(tmp_path / "ops.jsonl")
+
+    def model(req):
+        msgs = req.get("messages") or []
+        if msgs and str(msgs[-1].get("content")).startswith("An AI agent made a decision it should not have"):
+            return {"text": "I would add a rule about being careful."}
+        return ops.simulated_model(req)
+
+    fr = fix(Trace.load(path), ops.destructive_call(path), model=FunctionModel(model), match="db-reset|dropdb",
+             cache_dir=None)
+    assert not any(c.suggested for c in fr.candidates)

@@ -756,6 +756,8 @@ def show_fix(fr) -> RenderableType:
             row.append(f"{c.name:<18}", style="bold")
             row.append(f"not fully checked ({c.n} reruns before the budget ran out)", style="yellow")
             out.append(row)
+            if getattr(c, "suggested", False):
+                out.append(Text(f"        rule: {clip(c.add_system, 200)}", style="dim"))
             continue
         label, style = ("  PASS  ", "bold green") if ok else (("  PART  ", "bold yellow") if c.partial()
                                                              else ("  FAIL  ", "bold red"))
@@ -768,6 +770,8 @@ def show_fix(fr) -> RenderableType:
         if top and goal and top[0][0] == goal:
             row.append("  same as without the cause", style="dim")
         out.append(row)
+        if getattr(c, "suggested", False):
+            out.append(Text(f"        rule: {clip(c.add_system, 200)}", style="dim"))
         if top and not (goal and top[0][0] == goal):
             out.append(Text(f"        instead: {clip(top[0][0], 110)}", style="dim"))
     best = fr.best

@@ -258,6 +258,11 @@ rerunning the decision 10 times with each:
 - **both rules**
 - **fix the source**: the cause removed, which is what correcting or
   filtering that content where it comes from would do.
+- **the model's suggestions**: the agent's own model is shown the proven
+  cause and proposes up to three rules aimed at it. Each is checked like the
+  rest. Asking a model for a fix gets you its first idea, unchecked; here
+  every idea is measured before one is recommended (`--no-suggest` skips
+  this).
 
 Each is reported as how often the agent still makes the bad call, with the
 same significance test, and what it does instead. A fix passes (PASS) when the

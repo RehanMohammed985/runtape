@@ -331,7 +331,8 @@ def run_rerun(c: Console, trace: Trace, event: int, *, runs=5, drop=None, replac
 
 
 def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=None, model_fn=None, budget=600,
-            cache=True, yes=False, write_test=None, fill=None, full=False, guess=True, event_arg=None) -> int:
+            cache=True, yes=False, write_test=None, fill=None, full=False, guess=True, event_arg=None,
+            suggest=True) -> int:
     from .fix import check_for, fix, test_for, unique_path
     from .rerun import build_request, request_for
     from .why import make_target
@@ -351,8 +352,9 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
         from .why import estimate_calls
 
         likely, _ = estimate_calls(trace, event, full=full)
-        c.print(Text(f"This finds the cause (about {likely} model calls), then checks up to 4 fixes with {runs} "
-                     f"reruns each, {budget} calls at most. Replies are cached.", style="dim"))
+        n_fixes = 7 if suggest else 4
+        c.print(Text(f"This finds the cause (about {likely} model calls), then checks up to {n_fixes} fixes with "
+                     f"{runs} reruns each, {budget} calls at most. Replies are cached.", style="dim"))
         if input("Continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
             return 1
     counter = {"n": 0}
@@ -365,7 +367,7 @@ def run_fix(c: Console, trace: Trace, event: int, *, runs=10, tool=None, match=N
 
         fr = fix(trace, event, model=model, runs=runs, budget=budget, cache_dir=".runtape/cache" if cache else None,
                  progress=progress, tool=tool, match=match, fill=fill, on_call=on_call, depth="full" if full else "quick",
-                 guess=guess)
+                 guess=guess, suggest=suggest)
     c.print(render.show_fix(fr))
     if write_test:
         path = test_for(fr, trace, event, unique_path(write_test), runs=runs, model_fn=model_fn)
@@ -823,6 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--write-test", metavar="PATH", help="write a pytest regression test using the best verified fix")
     s.add_argument("--full", action="store_true", help="run the full cause search (see runtape why --help)")
     s.add_argument("--no-guess", action="store_true", help="test every piece (see runtape why --help)")
+    s.add_argument("--no-suggest", action="store_true", help="check only the standard fixes, without asking the "
+                   "model for fixes aimed at this cause")
     s.add_argument("-y", "--yes", action="store_true", help="don't ask before making model calls")
 
     s = sub.add_parser("test", help="write a pytest regression test for a recorded decision")
@@ -955,7 +959,7 @@ def main(argv: list[str] | None = None, console: Console | None = None) -> int:
             return run_fix(c, trace, resolve_decision(trace, args.event), runs=args.runs, tool=args.tool,
                            match=args.match, model_fn=args.model_fn, budget=args.budget, cache=not args.no_cache,
                            yes=args.yes, write_test=args.write_test, fill=args.fill, full=args.full,
-                           guess=not args.no_guess, event_arg=args.event)
+                           guess=not args.no_guess, event_arg=args.event, suggest=not args.no_suggest)
         elif cmd_name == "test":
             add = Path(args.add_system_file).read_text() if args.add_system_file else args.add_system
             return run_test(c, trace, resolve_decision(trace, args.event), out=args.out, tool=args.tool,

@@ -15,6 +15,9 @@ For each (user task, injection task) pair, in phases:
   fix        `runtape fix` checks fixes on the recorded decision. Then every prompt fix, and no fix, is
              tried on the live task: R full AgentDojo runs under attack (does the attack still work, does
              the user's task still get done) and R without the attack (does the fix break the task).
+  suggest    Asking the model for a fix against checking it: the agent's model proposes rules aimed at the
+             cause, `runtape fix` checks them on the recorded decision, and the live task is run with the
+             model's first suggestion (what asking gets you) and with the fix runtape picks.
   control    A decision the injection should not explain: the user's own call (paying the real bill) in a
              trace where the injection is present. `why` and the baselines run on it; blaming the injection
              is a false positive.
@@ -102,8 +105,8 @@ class ClaudeLLM(BasePipelineElement):
 
 WORD = re.compile(r"[a-z0-9]+")
 REDO_KEYS = {"injection_anywhere", "other_decisive", "baseline", "calls", "requests", "cache_hits", "stopped", "depth",
-             "warnings", "baselines", "fix"}
-PHASES = ("agent", "why", "baselines", "fix", "control")
+             "warnings", "baselines", "fix", "suggest"}
+PHASES = ("agent", "why", "baselines", "fix", "suggest", "control")
 READ_ONLY = re.compile(r"^(get|read|search|list|check|find|view)_")
 
 
@@ -378,38 +381,77 @@ class Benign:
 def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, inj_task, injections,
             benign) -> dict:
     fr = runtape.fix(trace, ev, model=model, report=rep, runs=10, budget=None, cache_dir=str(cache / "why"),
-                     workers=a.workers, **tkw)
+                     workers=a.workers, suggest=False, **tkw)
     cands = [{"name": c.name, "prompt": c.add_system is not None, "kept": c.kept, "n": c.n, "p": c.p,
               "holds": c.holds(), "partial": c.partial()} for c in fr.candidates]
     out = {"candidates": cands, "best": fr.best.name if fr.best else None, "calls": fr.calls}
     if a.live_runs:
         configs = [("none", SYSTEM)] + [(c.name, SYSTEM + "\n\n" + c.add_system) for c in fr.candidates
                                         if c.add_system]
-        # every run is independent, so they run side by side: under attack, and without it where the
-        # shared benign file doesn't already have enough
-        jobs = []
-        for name, system in configs:
-            jobs += [(name, system, True)] * a.live_runs
-            jobs += [(name, system, False)] * benign.missing(suite, user_task, a, system, a.live_runs)
-        pool = ThreadPoolExecutor(max_workers=max(1, a.workers))
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                results = list(pool.map(lambda j: live_one(suite, user_task, inj_task if j[2] else None,
-                                                           injections, a, j[1]), jobs))
-        finally:
-            pool.shutdown(cancel_futures=True)
-        live = {name: {"attack": [], "utility": []} for name, _ in configs}
-        for (name, system, attacked), (utility, att) in zip(jobs, results):
-            if attacked:
-                live[name]["attack"].append(att)
-                live[name]["utility"].append(utility)
-            else:
-                benign.add(suite, user_task, a, system, utility)
-        benign.save()
-        for name, system in configs:
-            live[name]["benign_utility"] = benign.get(suite, user_task, a, system, a.live_runs)
-        out["live"] = live
+        out["live"] = run_live(configs, a, suite, user_task, inj_task, injections, benign)
+    return out
+
+
+def run_live(configs, a, suite, user_task, inj_task, injections, benign) -> dict:
+    """Full AgentDojo runs of the pair with each (name, system prompt): a.live_runs under attack, and as many
+    without it (shared between pairs through the benign file)."""
+    # every run is independent, so they run side by side: under attack, and without it where the shared benign
+    # file doesn't already have enough
+    jobs = []
+    for name, system in configs:
+        jobs += [(name, system, True)] * a.live_runs
+        jobs += [(name, system, False)] * benign.missing(suite, user_task, a, system, a.live_runs)
+    pool = ThreadPoolExecutor(max_workers=max(1, a.workers))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = list(pool.map(lambda j: live_one(suite, user_task, inj_task if j[2] else None,
+                                                       injections, a, j[1]), jobs))
+    finally:
+        pool.shutdown(cancel_futures=True)
+    live = {name: {"attack": [], "utility": []} for name, _ in configs}
+    for (name, system, attacked), (utility, att) in zip(jobs, results):
+        if attacked:
+            live[name]["attack"].append(att)
+            live[name]["utility"].append(utility)
+        else:
+            benign.add(suite, user_task, a, system, utility)
+    benign.save()
+    for name, system in configs:
+        live[name]["benign_utility"] = benign.get(suite, user_task, a, system, a.live_runs)
+    return live
+
+
+def run_suggest(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, inj_task, injections, benign,
+                fixed: dict) -> dict:
+    """Ask the agent's model for fixes aimed at the cause, check them on the recorded decision, and run the live
+    task with its first suggestion (what asking the model gets you) and with runtape's pick: the prompt fix with
+    the lowest rate on the recorded decision, among the model's suggestions and among every fix. The standard
+    fixes' live runs come from the fix phase."""
+    fr = runtape.fix(trace, ev, model=model, report=rep, runs=10, budget=None, cache_dir=str(cache / "why"),
+                     workers=a.workers, suggest=True, **tkw)
+    cands = [{"name": c.name, "prompt": c.add_system is not None, "suggested": c.suggested, "kept": c.kept,
+              "n": c.n, "p": c.p, "holds": c.holds(), "partial": c.partial(),
+              **({"rule": c.add_system} if c.suggested else {})} for c in fr.candidates]
+    sug = [c for c in fr.candidates if c.suggested]
+    out = {"rules": [c.add_system for c in sug], "candidates": cands, "calls": fr.calls}
+    if not sug:
+        return out
+
+    def pick(cs):
+        cs = [c for c in cs if c.add_system and c.complete]
+        order = {id(c): i for i, c in enumerate(fr.candidates)}
+        return min(cs, key=lambda c: (not c.holds(), c.rate, order[id(c)])) if cs else None
+
+    first, best_sug, best_all = sug[0], pick(sug), pick(fr.candidates)
+    out.update(first=first.name, pick_suggested=best_sug.name if best_sug else None,
+               pick=best_all.name if best_all else None)
+    if a.live_runs:
+        have = (fixed or {}).get("live") or {}
+        need = {c.name: c for c in (first, best_sug, best_all) if c is not None and c.name not in have}
+        live = run_live([(n, SYSTEM + "\n\n" + c.add_system) for n, c in need.items()], a, suite, user_task,
+                        inj_task, injections, benign) if need else {}
+        out["live"] = {n: live.get(n) or have.get(n) for n in {c.name for c in (first, best_sug, best_all) if c}}
     return out
 
 
@@ -524,10 +566,12 @@ def main(argv=None):
             if "why" in redo:  # the fixes are based on why's cause, so they go too; the baselines stay
                 if row.get("fix") and row.get("headline") and "fix" not in redo:
                     # kept aside: if the new search names the same cause, the fixes (and their live runs) stand
-                    row["_kept_fix"] = {"headline": row["headline"], "fix": row["fix"]}
+                    row["_kept_fix"] = {"headline": row["headline"], "fix": row["fix"],
+                                        **({"suggest": row["suggest"]} if row.get("suggest") and
+                                           "suggest" not in redo else {})}
                 for k in [k for k in row if k.startswith("headline") or (k in REDO_KEYS and k != "baselines")]:
                     del row[k]
-            for ph in redo & {"baselines", "fix", "control"}:
+            for ph in redo & {"baselines", "fix", "suggest", "control"}:
                 row.pop(ph, None)
         _save(out, rows)
 
@@ -610,6 +654,8 @@ def main(argv=None):
                     kept = row.pop("_kept_fix", None)
                     if kept and kept["headline"] == row.get("headline"):
                         row["fix"] = kept["fix"]
+                        if kept.get("suggest"):
+                            row["suggest"] = kept["suggest"]
                     done("why")
                 # a cause to fix: found on a decision made consistently, or on an intermittent one
                 stable = ev is not None and row.get("baseline") and (
@@ -627,6 +673,11 @@ def main(argv=None):
                     row["fix"] = run_fix(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task, inj_task,
                                          injections, benign)
                     done("fix")
+                # -- the model's own fixes: asked for, checked, and run live against runtape's pick
+                if stable and "suggest" in phases and "suggest" not in row and row.get("fix"):
+                    row["suggest"] = run_suggest(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task,
+                                                 inj_task, injections, benign, row["fix"])
+                    done("suggest")
                 # -- a control decision: the user's own action, with the injection present
                 if "control" in phases and "control" not in row and controls < a.controls:
                     cd = control_decision(trace, user_task, inj_task, pre_env)

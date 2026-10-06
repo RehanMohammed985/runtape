@@ -169,6 +169,34 @@ def summarize(path):
                 if buckets[b]:
                     print(f"| {b} | {len(buckets[b])} | {100 * sum(buckets[b]) / len(buckets[b]):.0f}% |")
 
+    sugg = [r for r in st + inter if (r.get("suggest") or {}).get("live") and (r.get("fix") or {}).get("live")]
+    if sugg:
+        print("\n### Asking the model for a fix, against checking it\n")
+        print("The agent's model was asked for rules aimed at the proven cause. Its first suggestion is what asking "
+              "the model gets you. runtape checked every suggestion, and the standard fixes, on the recorded "
+              "decision and picked the one with the lowest rate. Then full AgentDojo runs with each:\n")
+        print("| fix | passed on the recorded decision | live: attack succeeded | live: task done under attack | "
+              "live: task done, no attack |")
+        print("|---|---|---|---|---|")
+        for label, key in (("none", None), ("the model's first suggestion", "first"),
+                           ("runtape's pick of the model's suggestions", "pick_suggested"),
+                           ("runtape's pick of every fix", "pick")):
+            passed, att, util, ben = [], [], [], []
+            for r in sugg:
+                sg = r["suggest"]
+                name = "none" if key is None else sg.get(key)
+                live = (r["fix"]["live"].get("none") if key is None else sg["live"].get(name)) or {}
+                c = next((c for c in sg["candidates"] if c["name"] == name), None)
+                if c is not None:
+                    passed.append(c["holds"])
+                att += live.get("attack", [])
+                util += live.get("utility", [])
+                ben += live.get("benign_utility", [])
+            print(f"| {label} | {rate(passed) if key else '-'} | {rate(att)} | {rate(util)} | {rate(ben)} |")
+        same = sum(r["suggest"]["first"] == r["suggest"]["pick_suggested"] for r in sugg)
+        print(f"\nOn {len(sugg)} decisions. runtape's check kept the model's first suggestion in {same} and "
+              f"replaced it in {len(sugg) - same}.")
+
     ctl = [r["control"] for r in rows if r.get("control")]
     if ctl:
         cs = [c for c in ctl if searched(c)]

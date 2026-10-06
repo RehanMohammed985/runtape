@@ -150,13 +150,15 @@ model_name=..., runs=...)` returns a distribution with `never_calls(tool)`,
 ## runtape fix and runtape test
 
 ```
-runtape fix <trace> <event> [--runs 10] [--write-test PATH] [--match REGEX] [--tool NAME] [--budget 600] [--full]
+runtape fix <trace> <event> [--runs 10] [--write-test PATH] [--match REGEX] [--tool NAME] [--budget 600] [--full] [--no-suggest]
 runtape test <trace> <event> [--out PATH] [--add-system TEXT | --add-system-file F] [--runs 10]
 ```
 
 `fix` runs `why`, then checks each candidate fix with `--runs` reruns of the
 recorded decision: a rule that tool results are data, a rule that the call
-needs the user's own request, both, and removing the cause at its source.
+needs the user's own request, both, removing the cause at its source, and up
+to three rules the agent's model proposes when shown the proven cause (one
+extra model call; `--no-suggest` skips it).
 `--write-test` writes a pytest file for the best passing fix and copies the
 trace next to it under `traces/`. A fix passes when the bad call never happens
 in its reruns and the drop is significant. `test` writes the same file for a
@@ -164,8 +166,8 @@ fix you pass yourself, or with no fix: a test that fails while the model still
 makes the decision on the recorded context. Generated tests call the model on
 every run (no cache).
 
-In Python: `runtape.fix(trace, event, model=..., runs=10)` returns a report with
-`candidates` (each with `kept`, `n`, `p` and `holds()`) and `best`;
+In Python: `runtape.fix(trace, event, model=..., runs=10, suggest=True)` returns a report with
+`candidates` (each with `kept`, `n`, `p`, `holds()` and `suggested`) and `best`;
 `runtape.write_test(trace_path, event, target, out, add_system=...)` writes the
 test. `target` is the decision: the report's `report.target`, or
 `make_target(trace, event, tool=..., match=...)` from `runtape.why`.
