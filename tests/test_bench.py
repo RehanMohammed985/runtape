@@ -24,6 +24,38 @@ def test_bench_harness_offline(tmp_path):
     assert "headline cause is the planted sentence" in rep
 
 
+def test_decoys_harness_offline(tmp_path):
+    """--decoys: a case counts only if the model ignores the decoy, and both runtape and asking the model are
+    scored on whether they blame the real cause or the decoy. The stand-in judge blames the decoy."""
+    out = tmp_path / "r.jsonl"
+    cmd = [sys.executable, str(ROOT / "bench" / "run.py"), "--model-fn", str(ROOT / "bench" / "sim.py") + ":model",
+           "--cases", "5", "--decoys", "--out", str(out), "--work", str(tmp_path)]
+    subprocess.run(cmd, check=True, capture_output=True, cwd=tmp_path)
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert all(r["decoy"] and r["without_decoy"] for r in rows)
+    ran = [r for r in rows if r["valid"] and "error" not in r]
+    assert ran and all(r["judge"]["blames"] == "decoy" for r in ran)
+    assert sum(r["headline_blames"] == "cause" for r in ran) >= len(ran) - 1
+    assert not any(r["guided"] for r in ran)  # the guess was the decoy: not confirmed, so every piece was tested
+    rep = subprocess.run([sys.executable, str(ROOT / "bench" / "report.py"), str(out)], capture_output=True,
+                         text=True, check=True).stdout
+    assert "asking the model which piece caused it: the decoy" in rep
+
+
+def test_decoys_are_elsewhere_and_remove_cleanly():
+    sys.path.insert(0, str(ROOT / "bench"))
+    from cases import generate
+
+    for c in generate(25, seed=3, decoys=True):
+        full = json.dumps(c.messages())
+        assert full.count(json.dumps(c.decoy)[1:-1]) == 1 and full.count(json.dumps(c.plant)[1:-1]) == 1, c.id
+        holder = [i for i, (_, _, r) in enumerate(c.steps) if c.plant in json.dumps(r) or c.plant in str(r)]
+        assert not any(c.decoy in json.dumps(c.steps[i][2]) or c.decoy in str(c.steps[i][2]) for i in holder), c.id
+        assert json.dumps(c.decoy)[1:-1] not in json.dumps(c.messages(with_decoy=False)), c.id
+    # without decoys, the cases are exactly what earlier runs generated (results stay rescorable)
+    assert [x.plant for x in generate(10)] == [x.plant for x in generate(10, decoys=False)]
+
+
 def test_cases_plant_once_and_remove_cleanly():
     sys.path.insert(0, str(ROOT / "bench"))
     from cases import generate
