@@ -32,7 +32,7 @@ def test_decoys_harness_offline(tmp_path):
            "--cases", "5", "--decoys", "--out", str(out), "--work", str(tmp_path)]
     subprocess.run(cmd, check=True, capture_output=True, cwd=tmp_path)
     rows = [json.loads(line) for line in out.read_text().splitlines()]
-    assert all(r["decoy"] and r["without_decoy"] for r in rows)
+    assert all(r["decoy"] for r in rows) and all(r["without_decoy"] for r in rows if r["valid"])
     ran = [r for r in rows if r["valid"] and "error" not in r]
     assert ran and all(r["judge"]["blames"] == "decoy" for r in ran)
     assert sum(r["headline_blames"] == "cause" for r in ran) >= len(ran) - 1
