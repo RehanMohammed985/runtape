@@ -21,6 +21,7 @@ For each (user task, injection task) pair, in phases:
 
     pip install agentdojo
     python bench/agentdojo/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --suite banking
+    python bench/agentdojo/run.py --anthropic claude-haiku-4-5-20251001 --max-dollars 5   # key in ANTHROPIC_API_KEY
     python bench/agentdojo/run.py ... --paper            # every phase, all four suites
     python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl
 
@@ -47,6 +48,8 @@ sys.path[:0] = [str(HERE.parents[1] / "src"), str(HERE.parent)]
 
 import openai  # noqa: E402
 from agentdojo.agent_pipeline import AgentPipeline, InitQuery, SystemMessage, ToolsExecutionLoop, ToolsExecutor  # noqa: E402
+from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement  # noqa: E402
+from agentdojo.functions_runtime import EmptyEnv  # noqa: E402
 from agentdojo.agent_pipeline.agent_pipeline import load_system_message  # noqa: E402
 from agentdojo.agent_pipeline.llms import openai_llm  # noqa: E402
 from agentdojo.attacks.attack_registry import load_attack  # noqa: E402
@@ -55,6 +58,98 @@ from agentdojo.task_suite.load_suites import get_suite  # noqa: E402
 import baselines  # noqa: E402
 import runtape  # noqa: E402
 from runtape.rerun import BudgetExceeded, FunctionModel, load_model_fn  # noqa: E402
+
+try:
+    import anthropic
+except ImportError:  # only needed for --anthropic
+    anthropic = None
+
+_sdks = [openai] + ([anthropic] if anthropic else [])
+API_ERROR = tuple(m.APIError for m in _sdks)
+CONNECTION_ERROR = tuple(m.APIConnectionError for m in _sdks)
+RATE_LIMIT = tuple(m.RateLimitError for m in _sdks)
+TIMEOUT = tuple(m.APITimeoutError for m in _sdks)
+STATUS_ERROR = tuple(m.APIStatusError for m in _sdks)
+OVERLOADED = tuple(m.InternalServerError for m in _sdks)  # 5xx (Anthropic's 529 overloaded) after retries
+
+# $ per million tokens (input, output), for --max-dollars. Cache writes cost 1.25x input, cache reads 0.1x.
+PRICES = {"claude-haiku-4-5": (1.0, 5.0), "claude-3-5-haiku": (0.8, 4.0), "claude-sonnet-5": (2.0, 10.0),
+          "claude-opus-5": (4.0, 20.0)}
+
+
+class SpendLimit(BaseException):
+    """Raised before a request once --max-dollars is spent. A BaseException, so it passes through the
+    handlers that record a broken agent run, and out of the worker threads reruns are made in."""
+
+
+class Spend:
+    """Dollars spent on Anthropic requests by this benchmark, kept in a file so a resumed run keeps counting.
+    Every request goes through the SDK's Messages.create, so that is where it's counted; cached reruns make no
+    request and cost nothing."""
+
+    def __init__(self, path: Path, model: str, limit: float | None):
+        self.path, self.limit = path, limit
+        self.price = next((v for k, v in PRICES.items() if model.startswith(k)), None)
+        if limit is not None and self.price is None:
+            raise SystemExit(f"--max-dollars doesn't know the price of {model}; add it to PRICES in run.py.")
+        self.total = json.loads(path.read_text()).get("dollars", 0.0) if path.exists() else 0.0
+        self._lock = __import__("threading").Lock()
+
+    def check(self) -> None:
+        if self.limit is not None and self.total >= self.limit:
+            raise SpendLimit(f"${self.total:.2f} spent, the --max-dollars limit is ${self.limit:g}")
+
+    def add(self, usage) -> None:
+        if self.price is None or usage is None:
+            return
+        pin, pout = self.price
+        tokens_in = (getattr(usage, "input_tokens", 0) or 0) + 1.25 * (getattr(usage, "cache_creation_input_tokens", 0)
+                                                                        or 0) + 0.1 * (getattr(usage, "cache_read_input_tokens", 0) or 0)
+        cost = (tokens_in * pin + (getattr(usage, "output_tokens", 0) or 0) * pout) / 1e6
+        with self._lock:
+            self.total += cost
+            self.path.write_text(json.dumps({"dollars": round(self.total, 4)}))
+
+
+def count_spend(spend: Spend) -> None:
+    """Count every Anthropic request (the agent's, the live fix runs', the reruns', the judge's) against spend."""
+    from anthropic.resources.messages import Messages
+
+    original = Messages.create
+
+    def create(self, *args, **kw):
+        spend.check()
+        out = original(self, *args, **kw)
+        spend.add(getattr(out, "usage", None))
+        return out
+
+    Messages.create = create
+
+
+class ClaudeLLM(BasePipelineElement):
+    """AgentDojo's Claude agent, through the plain (synchronous, non-streaming) Messages API, so runtape's
+    recorder sees every call. AgentDojo's own AnthropicLLM makes a new async client from the one it's given,
+    which would bypass the recorder; the conversions are AgentDojo's."""
+
+    def __init__(self, client, model: str, max_tokens: int | None = None):
+        self.client, self.model, self.max_tokens = client, model, max_tokens or 1024
+        self.name = model
+
+    def query(self, query, runtime, env=EmptyEnv(), messages=(), extra_args={}):  # noqa: B006
+        from agentdojo.agent_pipeline.llms import anthropic_llm as al
+
+        system, msgs = al._conversation_to_anthropic(messages)
+        kw = {"model": self.model, "messages": msgs, "max_tokens": self.max_tokens}
+        tools = [al._function_to_anthropic(t) for t in runtime.functions.values()]
+        if tools:
+            kw["tools"] = tools
+        if system:
+            kw["system"] = system
+        output = al._anthropic_to_assistant_message(self.client.messages.create(**kw))
+        if output["tool_calls"] is not None:  # as AgentDojo does: drop calls with names no tool can have
+            output["tool_calls"] = [tc for tc in output["tool_calls"]
+                                    if re.match("^[a-zA-Z0-9_-]{1,64}$", tc.function)]
+        return query, runtime, env, [*messages, output], extra_args
 
 WORD = re.compile(r"[a-z0-9]+")
 REDO_KEYS = {"injection_anywhere", "other_decisive", "baseline", "calls", "requests", "cache_hits", "stopped", "depth",
@@ -101,8 +196,11 @@ openai_llm._openai_to_assistant_message = _keep_signatures
 SYSTEM = load_system_message(None)
 
 
-def pipeline_for(client, model: str, system: str = SYSTEM) -> AgentPipeline:
-    llm = openai_llm.OpenAILLM(client, model)
+def pipeline_for(client, a, system: str = SYSTEM) -> AgentPipeline:
+    if a.anthropic:
+        llm = ClaudeLLM(client, a.model, a.max_tokens)
+    else:
+        llm = openai_llm.OpenAILLM(with_params(client, a) if client is not None else None, a.model)
     p = AgentPipeline([SystemMessage(system), InitQuery(), llm, ToolsExecutionLoop([ToolsExecutor(), llm])])
     p.name = "local"  # only used by the attack to address the model; the attack below uses no model name
     return p
@@ -127,11 +225,13 @@ def with_params(client, a):
     return _Params(client, {"max_tokens": a.max_tokens}) if a.max_tokens else client
 
 
-def _client(base_url):
+def _client(a):
     # a request that hangs is retried after 3 minutes instead of the client's default 10, so one stuck call
     # can't stall the run for half an hour
     kw = {"timeout": 180, "max_retries": 3}
-    return openai.OpenAI(base_url=base_url, **kw) if base_url else openai.OpenAI(**kw)
+    if a.base_url:
+        kw["base_url"] = a.base_url
+    return anthropic.Anthropic(**kw) if a.anthropic else openai.OpenAI(**kw)
 
 
 TARGET_RULE = 3  # bump when target_value changes, so rows found with the old rule are redone
@@ -287,14 +387,14 @@ def stale_judge(b: dict | None, a) -> bool:
 def live_one(suite, user_task, inj_task, injections, a, system: str) -> tuple[bool, bool | None]:
     """One full AgentDojo run of the pair, or of the user task alone when inj_task is None: (task done,
     attack worked). A model server that can't be reached raises: that is not a failed task."""
-    pipe = pipeline_for(with_params(_client(a.base_url), a), a.openai, system)
+    pipe = pipeline_for(_client(a), a, system)
     try:
         if inj_task is None:
             utility, _ = suite.run_task_with_pipeline(pipe, user_task, None, {})
             return bool(utility), None
         utility, attacked = suite.run_task_with_pipeline(pipe, user_task, inj_task, injections)
         return bool(utility), bool(attacked)
-    except openai.APIError:
+    except API_ERROR:
         raise
     except Exception:  # noqa: BLE001 - a broken run counts as a failed task
         return False, None if inj_task is None else False
@@ -309,7 +409,7 @@ class Benign:
         self.data = json.loads(path.read_text()) if path.exists() else {}
 
     def _key(self, suite, user_task, a, system) -> str:
-        return f"{a.openai}|{suite.name}|{user_task.ID}|{hashlib.sha256(system.encode()).hexdigest()[:16]}"
+        return f"{a.model}|{suite.name}|{user_task.ID}|{hashlib.sha256(system.encode()).hexdigest()[:16]}"
 
     def missing(self, suite, user_task, a, system, n) -> int:
         return max(0, n - len(self.data.get(self._key(suite, user_task, a, system), [])))
@@ -391,8 +491,13 @@ def _save(out: Path, rows: dict) -> None:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--openai", metavar="MODEL", required=True, help="model name at an OpenAI-compatible API")
-    ap.add_argument("--base-url", help="the API's base URL (key in OPENAI_API_KEY)")
+    which = ap.add_mutually_exclusive_group(required=True)
+    which.add_argument("--openai", metavar="MODEL", help="model name at an OpenAI-compatible API (key in OPENAI_API_KEY)")
+    which.add_argument("--anthropic", metavar="MODEL", help="a Claude model, through the Messages API (key in "
+                       "ANTHROPIC_API_KEY)")
+    ap.add_argument("--base-url", help="the API's base URL, when it isn't the provider's default")
+    ap.add_argument("--max-dollars", type=float, help="with --anthropic: stop (resumably) once this much has been "
+                    "spent on requests, counting from the first run of this model's benchmark")
     ap.add_argument("--model-fn", help="answer reruns with a Python function instead (offline tests)")
     ap.add_argument("--suite", help="banking, slack, travel, workspace, or a comma list (default banking; all "
                     "four with --paper)")
@@ -421,12 +526,17 @@ def main(argv=None):
     ap.add_argument("--out", help="results file (default bench/results/agentdojo-<model>.jsonl)")
     ap.add_argument("--work", help="folder for traces and the reply cache (default bench/agentdojo)")
     a = ap.parse_args(argv)
+    a.model = a.openai or a.anthropic
+    if a.anthropic and anthropic is None:
+        ap.error("--anthropic needs the anthropic package: pip install anthropic")
+    if a.max_dollars is not None and not a.anthropic:
+        ap.error("--max-dollars counts Claude requests; use it with --anthropic")
     phases = set(PHASES if a.paper else a.phases.split(","))
     a.suite = a.suite or ("banking,slack,travel,workspace" if a.paper else "banking")
     if a.model_fn and a.live_runs and "fix" in phases and not a.base_url:
         a.live_runs = 0  # nothing to run the live agent against
 
-    label = re.sub(r"[^\w.-]+", "_", a.openai) + (f"-max{a.max_tokens}" if a.max_tokens else "")
+    label = re.sub(r"[^\w.-]+", "_", a.model) + (f"-max{a.max_tokens}" if a.max_tokens else "")
     out = Path(a.out or HERE.parent / "results" / f"agentdojo-{label}.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
     rows: dict[str, dict] = {}
@@ -440,6 +550,11 @@ def main(argv=None):
     traces.mkdir(parents=True, exist_ok=True)
     cache = work / ".cache"
     benign = Benign(work / f"benign-{label}.json")
+    if a.anthropic:
+        spend = Spend(work / f"spend-{label}.json", a.model, a.max_dollars)
+        count_spend(spend)
+        if a.max_dollars is not None:
+            print(f"spent so far on {a.model}: ${spend.total:.2f} of ${a.max_dollars:g}", flush=True)
     fn_model = FunctionModel(load_model_fn(a.model_fn)) if a.model_fn else None
     depth = "full" if a.full else "quick"
     bad_requests = 0  # 400s in a row: one is the pair's own problem, three means something general is wrong
@@ -481,13 +596,13 @@ def main(argv=None):
             pi += 1
             pair = f"{suite_name}/{uid}/{iid}"
             row = rows.get(pair) or {"pair": pair, "suite": suite_name, "user_task": uid, "injection_task": iid,
-                                     "model": a.openai, "attack": a.attack,
+                                     "model": a.model, "attack": a.attack,
                                      **({"max_tokens": a.max_tokens} if a.max_tokens else {})}
             rows[pair] = row
             t0 = time.time()
             user_task, inj_task = suite.get_user_task_by_id(uid), suite.get_injection_task_by_id(iid)
             path = traces / f"{suite_name}-{uid}-{iid}.jsonl"
-            injections = load_attack(a.attack, suite, pipeline_for(None, a.openai)).attack(user_task, inj_task)
+            injections = load_attack(a.attack, suite, pipeline_for(None, a)).attack(user_task, inj_task)
             did = []
 
             def done(phase):  # keep each finished phase, so a crash later in the pair loses only the one running
@@ -503,13 +618,13 @@ def main(argv=None):
                 if "agent" in phases and "attacked" not in row and "error" not in row:
                     path.unlink(missing_ok=True)
                     rec = runtape.Recorder(path, name=f"agentdojo-{pair}", tags={"bench": "agentdojo", "pair": pair})
-                    pipe = pipeline_for(with_params(rec.wrap(_client(a.base_url)), a), a.openai)
+                    pipe = pipeline_for(rec.wrap(_client(a)), a)
                     try:
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore")
                             utility, attacked = suite.run_task_with_pipeline(pipe, user_task, inj_task, injections)
                         row.update(utility=utility, attacked=attacked)
-                    except openai.APIError:  # the server, not the agent: dealt with below
+                    except API_ERROR:  # the server, not the agent: dealt with below
                         raise
                     except Exception as e:  # noqa: BLE001 - a broken run of the agent is recorded, not fatal
                         row.update(error=f"{type(e).__name__}: {e}"[:300])
@@ -588,10 +703,15 @@ def main(argv=None):
                     row["control"]["baselines"]["judge"] = run_judge(trace, cev, {"match": pattern}, injections,
                                                                      inj_task.GOAL, fn_model, cache)
                     done("control")
-            except (openai.APIConnectionError, openai.RateLimitError) as e:
+            except SpendLimit as e:
+                _save(out, rows)
+                print(f"{pair}: stopping, {e}. Results so far are saved; raise --max-dollars and run the same "
+                      "command again to continue.")
+                return 1
+            except CONNECTION_ERROR + RATE_LIMIT + OVERLOADED as e:
                 # no network, a request that timed out every retry, or a rate limit that outlasted the client's
                 # retries: wait and try the pair again. Running out of credit is not one of these.
-                if isinstance(e, openai.RateLimitError) and "insufficient_quota" in str(e):
+                if isinstance(e, RATE_LIMIT) and "insufficient_quota" in str(e):
                     # OpenAI's out-of-credit error. Other servers say "quota" for per-minute limits too, so
                     # only this code stops the run
                     _save(out, rows)
@@ -601,7 +721,7 @@ def main(argv=None):
                     return 1
                 _save(out, rows)
                 offline += 1
-                if isinstance(e, openai.APITimeoutError):
+                if isinstance(e, TIMEOUT):
                     timeouts[pair] = timeouts.get(pair, 0) + 1
                     if timeouts[pair] >= 2:
                         print(f"{pair}: skipped for now, the model server kept timing out on it", flush=True)
@@ -611,14 +731,20 @@ def main(argv=None):
                           f"hour of retries; a daily request limit may be used up ({str(e.__cause__ or e)[:200]}).")
                     print("Stopping. Check the connection and run the same command again to continue.")
                     return 1
-                why_ = ("rate limited" if isinstance(e, openai.RateLimitError)
+                why_ = ("rate limited" if isinstance(e, RATE_LIMIT) else "the model server is overloaded"
+                        if isinstance(e, OVERLOADED)
                         else f"can't reach the model server ({e.__cause__ or e})")
                 print(f"{pair}: {why_}; trying again in {a.wait:g}s", flush=True)
                 time.sleep(a.wait)
                 pi -= 1  # the same pair again; its finished phases are kept
                 continue
-            except openai.APIStatusError as e:
+            except STATUS_ERROR as e:
                 _save(out, rows)
+                low = str(e).lower()
+                if "credit balance" in low or "usage limit" in low or "spend limit" in low:
+                    print(f"{pair}: the API says the account is out of credit or over its limit ({str(e)[:200]})")
+                    print("Stopping. Add credit or raise the limit, then run the same command again to continue.")
+                    return 1
                 refused = e.status_code in (401, 402, 403, 404) or (e.status_code == 400 and bad_requests >= 2)
                 if refused:
                     print(f"{pair}: the model server refused the request ({str(e)[:300]})")
@@ -633,6 +759,8 @@ def main(argv=None):
                 print(f"{pair}: {verdict(row)}", flush=True)
     _save(out, rows)
     print(f"\nresults in {out}. Summary: python bench/agentdojo/report.py {out}")
+    if a.anthropic:
+        print(f"spent on {a.model}: ${spend.total:.2f} in all")
     return 0
 
 

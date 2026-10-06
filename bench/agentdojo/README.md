@@ -20,7 +20,12 @@ pip install agentdojo
 python bench/agentdojo/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --suite banking
 python bench/agentdojo/run.py --openai sarvam-105b --base-url https://api.sarvam.ai/v1 --paper --pairs 30
 python bench/agentdojo/report.py bench/results/agentdojo-sarvam-105b.jsonl
+python bench/agentdojo/run.py --anthropic claude-haiku-4-5-20251001 --suite banking,slack --pairs 30 --max-dollars 5
 ```
+
+`--anthropic` runs AgentDojo's agent on a Claude model through the Messages API (key in `ANTHROPIC_API_KEY`), and
+the reruns go there too. `--max-dollars` counts every request (agent runs, reruns, the judge, live fix runs) from
+the tokens the API reports, and stops the run once that much is spent; it resumes where it stopped.
 
 `--paper` runs every phase on all four suites. Results are one JSON line per pair, rewritten after each
 phase; a pair that already has a phase isn't run again, so an interrupted run resumes, and running with

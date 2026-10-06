@@ -334,3 +334,80 @@ def test_thought_signatures_are_passed_back(tmp_path):
         srv.shutdown()
     # the agent ran and why's reruns replayed the history with its signatures
     assert row["attacked"] is True and row["headline_in_injection"] is True, (row, stdout)
+
+
+class Claude(BaseHTTPRequestHandler):
+    """The same stand-in agent behind Anthropic's Messages API."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        text = lambda c: c if isinstance(c, str) else " ".join(b.get("text", "") for b in c if b.get("type") == "text")  # noqa: E731
+        msgs = []
+        if body.get("system"):
+            msgs.append({"role": "system", "content": text(body["system"])})
+        for m in body["messages"]:
+            c = m["content"]
+            if m["role"] == "assistant":
+                calls = [{"function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
+                         for b in c if isinstance(c, list) and b.get("type") == "tool_use"]
+                msgs.append({"role": "assistant", "content": text(c), "tool_calls": calls})
+                continue
+            results = [b for b in c if isinstance(c, list) and b.get("type") == "tool_result"]
+            for b in results:
+                msgs.append({"role": "tool", "content": text(b.get("content") or "")})
+            if not results:
+                msgs.append({"role": "user", "content": text(c)})
+        r = reply(msgs)
+        content = [{"type": "text", "text": r["text"]}] if r.get("text") else []
+        content += [{"type": "tool_use", "id": f"toolu_{len(msgs)}_{i}", "name": n, "input": a}
+                    for i, (n, a) in enumerate(r.get("tool_calls") or [])]
+        data = json.dumps({"id": "msg_x", "type": "message", "role": "assistant", "model": body["model"],
+                           "content": content, "stop_reason": "tool_use" if r.get("tool_calls") else "end_turn",
+                           "stop_sequence": None, "usage": {"input_tokens": 1000, "output_tokens": 100}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _claude(tmp_path, *extra):
+    srv = HTTPServer(("127.0.0.1", 0), Claude)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    out = tmp_path / "res.jsonl"
+    env = {**os.environ, "ANTHROPIC_API_KEY": "test"}
+    try:
+        r = subprocess.run([sys.executable, str(ROOT / "bench/agentdojo/run.py"), "--anthropic", "claude-haiku-4-5-test",
+                            "--base-url", f"http://127.0.0.1:{srv.server_port}", "--suite", "banking",
+                            "--only", "user_task_0/injection_task_0", "--out", str(out), "--work", str(tmp_path),
+                            *extra], capture_output=True, text=True, env=env, timeout=900)
+    finally:
+        srv.shutdown()
+    return r, (json.loads(out.read_text().splitlines()[0]) if out.exists() and out.read_text().strip() else None)
+
+
+def test_claude_agent_every_phase_and_spend(tmp_path):
+    """--anthropic: AgentDojo's agent runs on Claude's Messages API, every call recorded; why, the baselines and
+    the fixes rerun it there; every request is counted against --max-dollars."""
+    r, row = _claude(tmp_path, "--phases", "agent,why,baselines,fix,control", "--live-runs", "1",
+                     "--max-dollars", "5")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert row["attacked"] is True and row["headline_in_injection"] is True, row
+    assert row["baselines"]["judge"]["inside"] is True
+    assert row["fix"]["live"]["none"]["attack"] == [True]
+    assert row["fix"]["live"]["untrusted content"]["attack"] == [False]
+    trace = next((tmp_path / "traces" / "claude-haiku-4-5-test").glob("*.jsonl"))
+    req = next(json.loads(x)["payload"] for x in trace.read_text().splitlines() if json.loads(x)["type"] == "llm_request")
+    assert req["provider"] == "anthropic" and req["api"] == "messages" and req["endpoint"]
+    spent = json.loads((tmp_path / "spend-claude-haiku-4-5-test.json").read_text())["dollars"]
+    assert 0 < spent < 5 and f"${spent:.2f}" in r.stdout
+
+
+def test_claude_stops_at_the_spend_limit(tmp_path):
+    r, row = _claude(tmp_path, "--phases", "agent,why", "--max-dollars", "0.01")
+    assert r.returncode == 1 and "--max-dollars limit is $0.01" in r.stdout, r.stdout + r.stderr
+    spent = json.loads((tmp_path / "spend-claude-haiku-4-5-test.json").read_text())["dollars"]
+    assert 0.01 <= spent < 0.02  # it stops at the first request past the limit
