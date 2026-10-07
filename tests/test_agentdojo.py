@@ -163,6 +163,18 @@ def test_every_phase_and_resume(server, tmp_path):
     again, _ = _run(server, tmp_path, "--phases", "agent,why,baselines,fix,suggest,control", "--redo", "why")
     assert again["headline"] == row["headline"] and again["fix"] == row["fix"], again
     assert again["suggest"] == row["suggest"]
+
+    # a search that names a different cause than before redoes the checks on the recorded decision, but keeps
+    # the live runs of the standard prompt fixes, which don't depend on the cause
+    out = tmp_path / "res.jsonl"
+    saved = json.loads(out.read_text().splitlines()[0])
+    saved["headline"] = "an older headline"
+    out.write_text(json.dumps(saved) + "\n")
+    Handler.requests = 0
+    third, _ = _run(server, tmp_path, "--phases", "agent,why,baselines,fix,control", "--redo", "why",
+                    "--live-runs", "2")
+    assert third["fix"]["live"] == row["fix"]["live"] and "suggest" not in third and "_old_live" not in third
+    assert Handler.requests == 0  # the offline checks came from the cache, and no live run was repeated
     assert "_kept_fix" not in again
     assert Handler.requests == 0  # everything else came from the cache (redoing the fixes too costs 51 here)
 

@@ -674,6 +674,10 @@ class Why:
         warn = server_side_context(self.req)
         if warn:
             rep.warnings.append(warn)
+        if self.base_trial.kept == 0 and not self.det:
+            # none in the first few reruns: a decision made one time in five shows none in five 30% of the time,
+            # so look at more before calling it a one-off
+            self._extend(self.base_trial, self.intermittent_confirm)
         if self.base_trial.kept == 0:
             rep.warnings.append(
                 f"The model never repeated this decision in {self.base_trial.n} reruns of the exact same context, "
@@ -706,10 +710,28 @@ class Why:
             if self.base < self.intermittent_below:
                 self.intermittent = rep.intermittent = True
                 self.threshold = rep.threshold = self.threshold * self.base
-                self.confirm = self.intermittent_confirm
                 # Halving a rate is a weaker bar than a drop of half the runs, so noise passes it more often.
                 # A stricter significance level (half) keeps false causes as rare as for a steady decision.
                 self.alpha = rep.alpha = self.alpha / 2
+                # The rarer the decision, the more reruns it takes to show that anything causes it: at 5 in 30,
+                # even a piece whose removal stops it entirely can't be told from chance. Use as many reruns
+                # per test as a cause that stops it would need to be proven, or say up front that it can't be.
+                pieces = len(extract(self.req, self.trace, self.target.request_id))
+                need = self._runs_needed(pieces)
+                while need is not None and self.base_trial.n < need:
+                    self._extend(self.base_trial, need)
+                    need = self._runs_needed(pieces) if self.base >= self.intermittent_min else None
+                if need is None:
+                    rep.warnings.append(
+                        f"Unstable decision: the model makes it in {self.base_trial.kept}/{self.base_trial.n} reruns "
+                        "of the same context. At that rate, even a piece whose removal stopped it entirely couldn't "
+                        f"be told from chance with up to {3 * self.intermittent_confirm} reruns per test, so the "
+                        "search stopped here. To test a suspect directly, compare "
+                        f"runtape odds {self._ref()} --runs 100 with runtape rerun {self._ref()} "
+                        "--drop <suspect event> --runs 100."
+                    )
+                    return
+                self.confirm = need
                 rep.warnings.append(
                     f"Intermittent decision: the model makes it in {self.base_trial.kept}/{self.base_trial.n} reruns "
                     "of the same context. The causes below are what it depends on: without each, it happens at most "
@@ -879,6 +901,16 @@ class Why:
         rep.trials, rep.confirmed, rep.causes = [t], [x for x in c.chain if x.p is not None], [c]
         rep.guided = {"piece": seg.where, "quote": quote}
         return True
+
+    def _runs_needed(self, pieces: int) -> int | None:
+        """Reruns per test (30, 60 or 90) at which a piece whose removal stopped an intermittent decision
+        entirely would pass the significance test, with every piece compared; None if not even 90 would."""
+        share = 0.5 if (self.depth == "quick" and self.guess) else 1.0  # the guess takes the other half
+        level = self.alpha * share * (1 - self.early_share) / max(1, pieces)
+        for n in (self.intermittent_confirm, 2 * self.intermittent_confirm, 3 * self.intermittent_confirm):
+            if fisher_less(0, n, round(self.base * n), n) <= level:
+                return n
+        return None
 
     def _ref(self) -> str:
         """The trace and decision, as the CLI takes them, for commands suggested in warnings."""

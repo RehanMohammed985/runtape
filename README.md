@@ -129,11 +129,14 @@ runtape why <trace> <event>
 `last`. How it works:
 
 1. Rerun the recorded model call on the unchanged context to measure how often
-   the model makes the same decision. Under 80% on the first reruns, the rate
-   is measured on 30. Under 60%, the decision is intermittent (an attack that
-   works one run in three is still an attack): a piece counts as a cause when
-   removing it at least halves the rate, confirmed on 30 reruns. Under 15%,
-   `why` says the decision is too rare to attribute and stops.
+   the model makes the same decision. Under 80% on the first reruns (or none
+   at all), the rate is measured on 30. Under 60%, the decision is
+   intermittent (an attack that works one run in three is still an attack): a
+   piece counts as a cause when removing it at least halves the rate. Each
+   test gets as many reruns as proving a cause at that rate takes: 30 for a
+   decision made half the time, 60 or 90 for one made one time in four or
+   five. Under 15%, `why` says the decision is too rare to attribute and
+   stops.
 2. Ask the model which piece of its context made it decide, and which
    sentence. Test that piece first (or, if removing all of it changes nothing,
    the part holding the quoted sentence) and narrow toward the quote. If it is
@@ -314,11 +317,13 @@ output varies, so checks are made over several runs.
   Anthropic, repeats read the context from the prompt cache at a tenth of the
   input price. On a local model it is free.
 - Randomness, on a simulated model, 100 runs per setting: when the context
-  doesn't matter at all, a cause was reported in 0 runs at a 90% decision
-  rate, 1 at 50% and 0 at 33%. A cause that moves the rate from 90% to 10%
-  was found in 97 runs (95 narrowed to exactly that sentence); 90% to 30%, in
-  83; 35% to 0 (an intermittent decision, about 200 model calls), in 89. No
-  run blamed a piece that wasn't the cause; the rest reported no cause.
+  doesn't matter at all, no cause was reported at a 90%, 50% or 33% decision
+  rate. A cause that moves the rate from 90% to 10% was found in 98 runs (96
+  narrowed to exactly that sentence); 90% to 30%, in 82 (10 of them as part
+  of a combination of pieces); 35% to 0 (an intermittent decision, about 210
+  model calls), in 99; 20% to 0, in 67, where the rest saw it too rarely on 30
+  reruns to search. No run blamed a piece that wasn't the cause on its own;
+  the rest reported no cause.
   Under 15% a decision can't be attributed; measure it with `odds` and test
   suspects with `rerun --drop`.
 - Large contexts: pieces are tested top-down and only narrowed where they

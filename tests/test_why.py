@@ -228,6 +228,30 @@ def test_intermittent_noise_is_not_a_cause(tmp_path):
         assert rep.intermittent and not rep.causes and rep.joint is None, (seed, rep.to_dict())
 
 
+def test_a_rare_decision_gets_the_reruns_proof_needs(tmp_path):
+    """Made one time in five: 30 reruns per test can't prove even a cause that stops it entirely (5/30 against
+    0/30 is p = 0.03), so the search uses as many as proof needs, and finds the stale doc."""
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    found = searched = 0
+    for seed in range(5):
+        rep = run(t, resp, _chance(seed, 0.2, 0.0), runs=10, budget=None)
+        if rep.intermittent:  # (a run can see it too rarely on the first 30 reruns, and say so)
+            searched += 1
+            assert rep.baseline.n >= 60, (rep.baseline.n, rep.warnings)
+        decisive = [c for c in rep.causes if c.kind == "decisive"]
+        found += bool(decisive) and "any amount" in decisive[0].finest.removed[-1].text
+        assert all("any amount" in c.finest.removed[-1].text for c in decisive), rep.to_dict()
+    assert searched >= 4 and found >= searched - 1
+
+
+def test_rare_noise_is_still_not_a_cause(tmp_path):
+    """More reruns per test don't make noise look like a cause: one time in five whatever the context."""
+    t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])
+    for seed in range(6):
+        rep = run(t, resp, _chance(100 + seed, 0.2, 0.2), runs=10, budget=None)
+        assert not rep.causes and rep.joint is None, (seed, rep.to_dict())
+
+
 def test_too_rare_stops(tmp_path):
     """Made once in twenty reruns: too rare to attribute, and said so."""
     t, resp = build_trace(tmp_path / "t.jsonl", [POLICY, SHIPPING, STALE])

@@ -379,7 +379,7 @@ class Benign:
 
 
 def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, inj_task, injections,
-            benign) -> dict:
+            benign, reuse_live: dict | None = None) -> dict:
     fr = runtape.fix(trace, ev, model=model, report=rep, runs=10, budget=None, cache_dir=str(cache / "why"),
                      workers=a.workers, suggest=False, **tkw)
     cands = [{"name": c.name, "prompt": c.add_system is not None, "kept": c.kept, "n": c.n, "p": c.p,
@@ -388,7 +388,10 @@ def run_fix(trace, ev, tkw: dict, rep, model, cache: Path, a, suite, user_task, 
     if a.live_runs:
         configs = [("none", SYSTEM)] + [(c.name, SYSTEM + "\n\n" + c.add_system) for c in fr.candidates
                                         if c.add_system]
-        out["live"] = run_live(configs, a, suite, user_task, inj_task, injections, benign)
+        have = reuse_live or {}
+        todo = [(n, sp) for n, sp in configs if len((have.get(n) or {}).get("attack") or []) < a.live_runs]
+        live = run_live(todo, a, suite, user_task, inj_task, injections, benign) if todo else {}
+        out["live"] = {n: live.get(n) or have[n] for n, _ in configs}
     return out
 
 
@@ -656,6 +659,10 @@ def main(argv=None):
                         row["fix"] = kept["fix"]
                         if kept.get("suggest"):
                             row["suggest"] = kept["suggest"]
+                    elif kept and kept["fix"].get("live"):
+                        # a different cause: the checks on the recorded decision are redone (mostly from cached
+                        # reruns), but the standard prompt fixes and their live runs don't depend on the cause
+                        row["_old_live"] = kept["fix"]["live"]
                     done("why")
                 # a cause to fix: found on a decision made consistently, or on an intermittent one
                 stable = ev is not None and row.get("baseline") and (
@@ -671,7 +678,7 @@ def main(argv=None):
                 # -- fixes, checked on the recorded decision and on the live task
                 if stable and "fix" in phases and "fix" not in row and row.get("headline"):
                     row["fix"] = run_fix(trace, ev, tkw, rep, fn_model, cache, a, suite, user_task, inj_task,
-                                         injections, benign)
+                                         injections, benign, reuse_live=row.pop("_old_live", None))
                     done("fix")
                 # -- the model's own fixes: asked for, checked, and run live against runtape's pick
                 if stable and "suggest" in phases and "suggest" not in row and row.get("fix"):
